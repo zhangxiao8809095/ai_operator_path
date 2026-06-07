@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Build
+build/
+dist/
+*.egg-info/
+*.so
+*.o
+*.a
+
+# CUDA / Nsight large outputs
+*.nsys-rep
+*.ncu-rep
+*.sqlite
+*.qdrep
+
+# Logs / results
+logs/
+tmp/
+.cache/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Models / datasets
+models/
+checkpoints/
+*.pt
+*.pth
+*.safetensors
+*.bin
