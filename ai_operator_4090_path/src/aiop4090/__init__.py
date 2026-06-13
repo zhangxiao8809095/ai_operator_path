@@ -1,4 +1,6 @@
 """AI operator optimization lab wrappers."""
+import torch
+
 from . import _C
 
 
