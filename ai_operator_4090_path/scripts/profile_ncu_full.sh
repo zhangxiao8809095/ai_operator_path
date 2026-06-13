@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
-set -euo pipefail
-OP=${1:-gemm_tiled}
-mkdir -p reports/ncu
-ncu \
-  --target-processes all \
-  --section SpeedOfLight \
-  --section MemoryWorkloadAnalysis \
-  --section SchedulerStats \
-  --section WarpStateStats \
-  --force-overwrite \
-  -o reports/ncu/${OP}_full \
-  python benchmark/profile_entry.py --op ${OP} --iters 10
+set -e
 
-echo "Generated: reports/ncu/${OP}_full.ncu-rep"
+OP=${1:-gemm_naive}
+ITERS=${ITERS:-20}
+OUT_DIR=${OUT_DIR:-reports/ncu}
+PYTHON_BIN=${PYTHON_BIN:-/home/easyai/.venvs/oplab/bin/python}
+
+mkdir -p "$OUT_DIR"
+
+TORCH_LIB=$($PYTHON_BIN -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))")
+
+sudo env \
+  PATH="/usr/local/cuda-12.6/bin:$PATH" \
+  LD_LIBRARY_PATH="$TORCH_LIB:/usr/local/cuda-12.6/lib64:${LD_LIBRARY_PATH:-}" \
+  TORCH_CUDA_ARCH_LIST="8.9" \
+  ncu --target-processes all \
+      --set full \
+      --force-overwrite \
+      -o "$OUT_DIR/${OP}_full" \
+      "$PYTHON_BIN" benchmark/profile_entry.py \
+      --op "$OP" \
+      --iters "$ITERS"
