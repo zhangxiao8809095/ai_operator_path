@@ -15,7 +15,8 @@ def repeat(fn, iters=30):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--op", required=True, choices=[
-        "gemm_naive", "gemm_tiled", "gemm_regtile2x2", "softmax", "layernorm", "rmsnorm", "attention_naive"
+        "gemm_naive", "gemm_tiled", "gemm_tiled_padding", "gemm_regtile2x2", "gemm_regtile4x4",
+        "gemm_vectorized_float4", "gemm_wmma_fp16", "softmax", "layernorm", "rmsnorm", "attention_naive"
     ])
     parser.add_argument("--iters", type=int, default=30)
     args = parser.parse_args()
@@ -25,10 +26,16 @@ def main():
         m = n = k = 2048
         a = torch.randn(m, k, device="cuda")
         b = torch.randn(k, n, device="cuda")
+        a_half = a.half()
+        b_half = b.half()
         fn = {
             "gemm_naive": lambda: ops.gemm_naive(a, b),
             "gemm_tiled": lambda: ops.gemm_tiled(a, b),
+            "gemm_tiled_padding": lambda: ops.gemm_tiled_padding(a, b),
             "gemm_regtile2x2": lambda: ops.gemm_regtile2x2(a, b),
+            "gemm_regtile4x4": lambda: ops.gemm_regtile4x4(a, b),
+            "gemm_vectorized_float4": lambda: ops.gemm_vectorized_float4(a, b),
+            "gemm_wmma_fp16": lambda: ops.gemm_wmma_fp16(a_half, b_half),
         }[args.op]
     elif args.op == "softmax":
         x = torch.randn(8192, 4096, device="cuda")

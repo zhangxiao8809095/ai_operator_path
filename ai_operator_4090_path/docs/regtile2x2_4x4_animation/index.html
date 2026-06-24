@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Regtile2x2 4×4 完整计算动画</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">CUDA GEMM 教学动画</p>
+        <h1>Regtile2x2 计算一个 4×4 GEMM</h1>
+      </div>
+      <div class="data-path" aria-label="数据流">
+        <span>Global</span>
+        <b>→</b>
+        <span>Shared</span>
+        <b>→</b>
+        <span>Registers</span>
+        <b>→</b>
+        <span>C</span>
+      </div>
+    </header>
+
+    <section class="lesson-strip">
+      <div>
+        <span class="section-label">当前步骤</span>
+        <strong id="phase-title">线程分工与寄存器清零</strong>
+      </div>
+      <p id="phase-summary">教学版把 RT_TILE 从 16 缩小到 2：一个 2×2 线程块计算完整 4×4 的 C。</p>
+      <div class="progress-track" aria-label="动画进度">
+        <span id="progress-bar"></span>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <div class="visual-stage">
+        <div class="stage-heading">
+          <div>
+            <span class="section-label" id="phase-label">映射</span>
+            <h2 id="stage-title">4 个线程，每个线程负责一个 2×2 输出块</h2>
+          </div>
+          <span class="step-count" id="step-count">01 / 10</span>
+        </div>
+
+        <section class="global-section">
+          <header class="panel-heading">
+            <div>
+              <span>Global Memory</span>
+              <strong>A[4,4] 与 B[4,4]</strong>
+            </div>
+            <small id="global-note">等待把第一个 K tile 搬入 shared memory</small>
+          </header>
+          <div class="global-matrices">
+            <article class="matrix-panel matrix-a-panel">
+              <div class="matrix-title">
+                <span class="matrix-name matrix-a">A</span>
+                <small>按列切成 K tile</small>
+              </div>
+              <div class="matrix-grid" id="matrix-a" aria-label="Global Memory 中的矩阵 A"></div>
+            </article>
+            <article class="matrix-panel matrix-b-panel">
+              <div class="matrix-title">
+                <span class="matrix-name matrix-b">B</span>
+                <small>按行切成 K tile</small>
+              </div>
+              <div class="matrix-grid" id="matrix-b" aria-label="Global Memory 中的矩阵 B"></div>
+            </article>
+            <article class="matrix-panel matrix-c-panel">
+              <div class="matrix-title">
+                <span class="matrix-name matrix-c">C</span>
+                <small id="c-note">尚未写回</small>
+              </div>
+              <div class="matrix-grid" id="matrix-c" aria-label="输出矩阵 C"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="shared-section">
+          <header class="panel-heading">
+            <div>
+              <span>Shared Memory</span>
+              <strong id="shared-title">As[4,2] 与 Bs[2,4]</strong>
+            </div>
+            <small id="shared-note">每个 global 元素只搬入一次，之后被多个线程复用</small>
+          </header>
+          <div class="shared-layout">
+            <article class="shared-panel">
+              <div class="matrix-title">
+                <span class="matrix-name matrix-a">As</span>
+                <small>A tile</small>
+              </div>
+              <div class="shared-grid shared-a" id="shared-a" aria-label="Shared Memory 中的 As"></div>
+            </article>
+            <article class="shared-panel">
+              <div class="matrix-title">
+                <span class="matrix-name matrix-b">Bs</span>
+                <small>B tile</small>
+              </div>
+              <div class="shared-grid shared-b" id="shared-b" aria-label="Shared Memory 中的 Bs"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="register-section">
+          <header class="panel-heading">
+            <div>
+              <span>Registers</span>
+              <strong>每个线程私有的 2×2 累加器</strong>
+            </div>
+            <small id="register-note">点击线程卡片可查看该线程负责的 C 位置</small>
+          </header>
+          <div class="thread-grid" id="thread-grid" aria-label="四个线程的寄存器状态"></div>
+        </section>
+
+        <section class="detail-grid">
+          <article class="explain-panel">
+            <span class="section-label">当前计算</span>
+            <code id="calculation">acc00/01/10/11 = 0</code>
+            <p id="phase-detail">每个线程拥有自己独立的四个寄存器累加器。</p>
+          </article>
+          <article class="thread-detail">
+            <span class="section-label">选中线程</span>
+            <strong id="selected-thread-title">T(0,0)</strong>
+            <p id="selected-thread-detail">负责 C[0:1, 0:1]。</p>
+            <div class="operand-row" id="selected-operands"></div>
+          </article>
+          <article class="source-panel">
+            <header>
+              <span class="section-label">对应 gemm.cu</span>
+              <strong id="source-location">gemm.cu:54-70</strong>
+            </header>
+            <pre id="source-code" aria-label="当前步骤对应的 gemm.cu 代码"></pre>
+          </article>
+        </section>
+      </div>
+
+      <aside class="inspector">
+        <section class="control-panel">
+          <div class="control-row">
+            <button class="icon-button" id="reset-button" type="button" title="重置动画" aria-label="重置动画">↺</button>
+            <button class="icon-button" id="prev-button" type="button" title="上一步" aria-label="上一步">‹</button>
+            <button class="play-button" id="play-button" type="button" title="播放" aria-label="播放">
+              <span id="play-icon">▶</span>
+            </button>
+            <button class="icon-button" id="next-button" type="button" title="下一步" aria-label="下一步">›</button>
+          </div>
+          <label class="speed-control">
+            <span>速度</span>
+            <input id="speed-input" type="range" min="450" max="1800" value="1050" step="50">
+            <output id="speed-output">1.0×</output>
+          </label>
+        </section>
+
+        <section class="map-panel">
+          <h2>Block 里的线程</h2>
+          <div class="block-map" id="block-map" aria-label="2×2 线程块"></div>
+        </section>
+
+        <section class="stats-panel">
+          <h2>本步骤数据状态</h2>
+          <dl>
+            <div>
+              <dt>K tile</dt>
+              <dd id="stat-tile">未开始</dd>
+            </div>
+            <div>
+              <dt>Shared</dt>
+              <dd id="stat-shared">空</dd>
+            </div>
+            <div>
+              <dt>Registers</dt>
+              <dd id="stat-registers">全部为 0</dd>
+            </div>
+            <div>
+              <dt>C 写回</dt>
+              <dd id="stat-c">尚未发生</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="legend-panel">
+          <h2>颜色含义</h2>
+          <div class="legend-row"><i class="legend-a"></i><span>A / As 当前参与</span></div>
+          <div class="legend-row"><i class="legend-b"></i><span>B / Bs 当前参与</span></div>
+          <div class="legend-row"><i class="legend-reg"></i><span>寄存器刚更新</span></div>
+          <div class="legend-row"><i class="legend-c"></i><span>C 已写回</span></div>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>

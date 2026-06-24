@@ -12,8 +12,24 @@ def gemm_tiled(a, b):
     return _C.gemm_tiled(a, b)
 
 
+def gemm_tiled_padding(a, b):
+    return _C.gemm_tiled_padding(a, b)
+
+
 def gemm_regtile2x2(a, b):
     return _C.gemm_regtile2x2(a, b)
+
+
+def gemm_regtile4x4(a, b):
+    return _C.gemm_regtile4x4(a, b)
+
+
+def gemm_vectorized_float4(a, b):
+    return _C.gemm_vectorized_float4(a, b)
+
+
+def gemm_wmma_fp16(a, b):
+    return _C.gemm_wmma_fp16(a, b)
 
 
 def softmax_row(x):

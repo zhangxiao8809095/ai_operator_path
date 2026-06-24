@@ -12,11 +12,17 @@ shapes = [
 for m, n, k in shapes:
     a = torch.randn(m, k, device="cuda")
     b = torch.randn(k, n, device="cuda")
+    a_half = a.half()
+    b_half = b.half()
     for name, fn in [
         ("torch", lambda: a @ b),
         ("naive", lambda: ops.gemm_naive(a, b)),
         ("tiled", lambda: ops.gemm_tiled(a, b)),
+        ("tiled_pad", lambda: ops.gemm_tiled_padding(a, b)),
         ("regtile2x2", lambda: ops.gemm_regtile2x2(a, b)),
+        ("regtile4x4", lambda: ops.gemm_regtile4x4(a, b)),
+        ("float4", lambda: ops.gemm_vectorized_float4(a, b)),
+        ("wmma_fp16", lambda: ops.gemm_wmma_fp16(a_half, b_half)),
     ]:
         repeat = 10 if m >= 4096 else 30
         ms = cuda_bench(fn, warmup=5, repeat=repeat)

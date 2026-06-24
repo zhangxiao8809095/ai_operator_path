@@ -52,12 +52,69 @@ bash scripts/30_bench.sh
 python benchmark/bench_gemm_shapes.py
 ```
 
+## 3.1 GEMM 交互动画
+
+用于从数据流和线程分工角度理解 `gemm_naive`、`gemm_tiled` 和 `gemm_regtile2x2`：
+
+```text
+docs/gemm_animation/index.html
+```
+
+## 3.2 Regtile2x2 4×4 完整动画
+
+用于单独观察 `gemm_regtile2x2` 在一个 4×4 GEMM 上的完整执行过程：
+
+```text
+docs/regtile2x2_4x4_animation/index.html
+```
+
+内容包括：
+
+- Global Memory 中 A/B tile 的搬运
+- Shared Memory 中 As/Bs 的覆盖与复用
+- 4 个线程各自的 `acc00/acc01/acc10/acc11` 寄存器变化
+- 最终寄存器写回 C 的过程
+
+## 3.3 CUDA 编程模型动画
+
+如果对 Grid、Block、Thread、Warp、Shared Memory 等概念还不熟悉，建议先看：
+
+```text
+docs/cuda_model_animation/index.html
+```
+
+内容包括：
+
+- Grid / Block / Thread 的层级和全局坐标计算
+- Warp、SIMT、分支发散和 Block 内同步
+- Register / Shared / Global Memory 的归属、生命周期和数据流
+- 合并访问与跨步访问的区别
+
+## 3.4 NCU 性能指标动画
+
+用于理解 Nsight Compute 中常见的高层性能指标，以及如何从指标组合判断算子瓶颈：
+
+```text
+docs/ncu_metrics_animation/index.html
+```
+
+内容包括：
+
+- Duration、SM Throughput、Memory Throughput、DRAM Throughput、Achieved Occupancy
+- Compute-bound、DRAM-bound、低 Occupancy 等典型场景
+- 指标之间的关系和常见误判
+- 阅读 NCU 报告时的推荐诊断顺序
+
 ## 4. Nsight Compute
 
 ```bash
 bash scripts/profile_ncu.sh gemm_naive
 bash scripts/profile_ncu.sh gemm_tiled
+bash scripts/profile_ncu.sh gemm_tiled_padding
 bash scripts/profile_ncu.sh gemm_regtile2x2
+bash scripts/profile_ncu.sh gemm_regtile4x4
+bash scripts/profile_ncu.sh gemm_vectorized_float4
+bash scripts/profile_ncu.sh gemm_wmma_fp16
 bash scripts/profile_ncu.sh softmax
 bash scripts/profile_ncu.sh layernorm
 bash scripts/profile_ncu.sh rmsnorm
@@ -92,7 +149,11 @@ docs/phase_map.md
 
 - `gemm_naive`
 - `gemm_tiled`
+- `gemm_tiled_padding`
 - `gemm_regtile2x2`
+- `gemm_regtile4x4`
+- `gemm_vectorized_float4`
+- `gemm_wmma_fp16`
 
 ### Softmax
 

@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GEMM 动画：Naive 到 Register Tiling</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">CUDA GEMM 学习实验</p>
+        <h1>从 Naive 到 Register Tiling</h1>
+      </div>
+      <div class="formula" aria-label="矩阵乘法公式">
+        <span>A[M,K]</span>
+        <strong>×</strong>
+        <span>B[K,N]</span>
+        <strong>=</strong>
+        <span>C[M,N]</span>
+      </div>
+    </header>
+
+    <nav class="mode-tabs" aria-label="GEMM 实现选择">
+      <button class="mode-tab is-active" data-mode="naive" type="button">
+        <span class="mode-index">01</span>
+        <span>Naive</span>
+      </button>
+      <button class="mode-tab" data-mode="tiled" type="button">
+        <span class="mode-index">02</span>
+        <span>Tiled</span>
+      </button>
+      <button class="mode-tab" data-mode="regtile" type="button">
+        <span class="mode-index">03</span>
+        <span>Regtile 2×2</span>
+      </button>
+    </nav>
+
+    <section class="lesson-strip">
+      <div>
+        <span class="lesson-label">当前思想</span>
+        <strong id="mode-title">一个线程计算一个输出</strong>
+      </div>
+      <p id="mode-summary">线程直接从 Global Memory 读取 A 的一行和 B 的一列，完成一个点积。</p>
+      <div class="progress-track" aria-label="动画进度">
+        <span id="progress-bar"></span>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <div class="visual-stage">
+        <div class="stage-heading">
+          <div>
+            <span class="stage-kicker" id="phase-label">定位输出</span>
+            <h2 id="phase-title">线程 T(0,0) 负责 C[0,0]</h2>
+          </div>
+          <span class="step-count" id="step-count">01 / 07</span>
+        </div>
+
+        <div class="matrix-scene" id="matrix-scene">
+          <article class="matrix-panel" data-matrix="A">
+            <div class="matrix-title">
+              <span class="matrix-name matrix-a">A</span>
+              <span>4 × 4</span>
+            </div>
+            <div class="matrix-grid" id="matrix-a" aria-label="矩阵 A"></div>
+          </article>
+
+          <div class="operator-sign" aria-hidden="true">×</div>
+
+          <article class="matrix-panel" data-matrix="B">
+            <div class="matrix-title">
+              <span class="matrix-name matrix-b">B</span>
+              <span>4 × 4</span>
+            </div>
+            <div class="matrix-grid" id="matrix-b" aria-label="矩阵 B"></div>
+          </article>
+
+          <div class="operator-sign" aria-hidden="true">=</div>
+
+          <article class="matrix-panel" data-matrix="C">
+            <div class="matrix-title">
+              <span class="matrix-name matrix-c">C</span>
+              <span>4 × 4</span>
+            </div>
+            <div class="matrix-grid" id="matrix-c" aria-label="矩阵 C"></div>
+          </article>
+        </div>
+
+        <div class="memory-path">
+          <section class="memory-zone global-zone">
+            <div class="zone-title">
+              <span class="zone-dot"></span>
+              Global Memory
+            </div>
+            <div class="memory-content" id="global-content">
+              <span>A</span>
+              <span>B</span>
+            </div>
+          </section>
+
+          <div class="path-arrow" id="global-arrow" aria-hidden="true">
+            <span></span>
+          </div>
+
+          <section class="memory-zone shared-zone">
+            <div class="zone-title">
+              <span class="zone-dot"></span>
+              Shared Memory
+            </div>
+            <div class="memory-content" id="shared-content">
+              <span class="empty-state">未使用</span>
+            </div>
+          </section>
+
+          <div class="path-arrow" id="shared-arrow" aria-hidden="true">
+            <span></span>
+          </div>
+
+          <section class="memory-zone register-zone">
+            <div class="zone-title">
+              <span class="zone-dot"></span>
+              Registers
+            </div>
+            <div class="memory-content register-content" id="register-content">
+              <span class="register-chip">acc = 0</span>
+            </div>
+          </section>
+        </div>
+
+        <div class="calculation-panel">
+          <span class="calculation-label">当前计算</span>
+          <code id="calculation">C[0,0] = Σ A[0,k] × B[k,0]</code>
+          <p id="phase-detail">每个线程通过 blockIdx、threadIdx 找到唯一的输出位置。</p>
+        </div>
+
+        <article class="source-panel">
+          <header>
+            <div>
+              <span class="stage-kicker">同步源码</span>
+              <strong id="source-location">gemm.cu:11-17</strong>
+            </div>
+            <a id="source-link" href="../../src/aiop4090/csrc/gemm.cu">打开 gemm.cu</a>
+          </header>
+          <div class="source-body">
+            <pre id="source-code" aria-label="当前步骤对应的 gemm.cu 源码"></pre>
+            <div class="source-explanation">
+              <span class="stage-kicker">动画如何对应代码</span>
+              <p id="source-explanation">线程先根据 blockIdx 和 threadIdx 确定输出位置，再初始化累加器。</p>
+            </div>
+          </div>
+        </article>
+      </div>
+
+      <aside class="inspector">
+        <section class="control-panel">
+          <div class="control-row">
+            <button class="icon-button" id="reset-button" type="button" title="重置动画" aria-label="重置动画">↺</button>
+            <button class="icon-button" id="prev-button" type="button" title="上一步" aria-label="上一步">‹</button>
+            <button class="play-button" id="play-button" type="button" title="播放" aria-label="播放">
+              <span id="play-icon">▶</span>
+            </button>
+            <button class="icon-button" id="next-button" type="button" title="下一步" aria-label="下一步">›</button>
+          </div>
+          <label class="speed-control">
+            <span>速度</span>
+            <input id="speed-input" type="range" min="350" max="1800" value="1050" step="50">
+            <output id="speed-output">1.0×</output>
+          </label>
+        </section>
+
+        <section class="stats-panel">
+          <h2>这一版改变了什么</h2>
+          <dl>
+            <div>
+              <dt>线程产出</dt>
+              <dd id="stat-output">1 个 C 元素</dd>
+            </div>
+            <div>
+              <dt>Global 读取</dt>
+              <dd id="stat-loads">每次乘加都读取</dd>
+            </div>
+            <div>
+              <dt>数据复用</dt>
+              <dd id="stat-reuse">几乎没有</dd>
+            </div>
+            <div>
+              <dt>Block 覆盖</dt>
+              <dd id="stat-block">16 × 16 输出</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="concept-panel">
+          <h2>概念阶梯</h2>
+          <ol>
+            <li class="is-current" data-concept="parallel">
+              <span>并行分工</span>
+              <small>不同线程负责不同输出</small>
+            </li>
+            <li data-concept="shared">
+              <span>Block 内复用</span>
+              <small>Global → Shared</small>
+            </li>
+            <li data-concept="register">
+              <span>线程内复用</span>
+              <small>一个线程计算多个输出</small>
+            </li>
+          </ol>
+        </section>
+      </aside>
+    </section>
+
+    <section class="comparison-band">
+      <header>
+        <span class="stage-kicker">演进关系</span>
+        <h2>优化没有改变数学，只改变数据如何流动</h2>
+      </header>
+      <div class="comparison-grid">
+        <article data-jump-mode="naive">
+          <span class="comparison-number">01</span>
+          <h3>Naive</h3>
+          <p>先让 GPU 并行算起来。</p>
+          <strong>一个线程 → 一个输出</strong>
+        </article>
+        <article data-jump-mode="tiled">
+          <span class="comparison-number">02</span>
+          <h3>Tiled</h3>
+          <p>让线程合作搬运并复用数据。</p>
+          <strong>Global → Shared → 计算</strong>
+        </article>
+        <article data-jump-mode="regtile">
+          <span class="comparison-number">03</span>
+          <h3>Regtile 2×2</h3>
+          <p>让一次读取完成更多乘加。</p>
+          <strong>2 个 A × 2 个 B → 4 个输出</strong>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>

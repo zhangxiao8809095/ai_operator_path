@@ -23,11 +23,17 @@ def bench_gemm():
     for m, n, k in [(512, 512, 512), (1024, 1024, 1024), (2048, 2048, 2048)]:
         a = torch.randn(m, k, device="cuda")
         b = torch.randn(k, n, device="cuda")
+        a_half = a.half()
+        b_half = b.half()
         cases = [
             ("torch_mm", lambda: a @ b),
             ("naive", lambda: ops.gemm_naive(a, b)),
             ("tiled", lambda: ops.gemm_tiled(a, b)),
+            ("tiled_padding", lambda: ops.gemm_tiled_padding(a, b)),
             ("regtile2x2", lambda: ops.gemm_regtile2x2(a, b)),
+            ("regtile4x4", lambda: ops.gemm_regtile4x4(a, b)),
+            ("vector_float4", lambda: ops.gemm_vectorized_float4(a, b)),
+            ("wmma_fp16", lambda: ops.gemm_wmma_fp16(a_half, b_half)),
         ]
         for name, fn in cases:
             ms = cuda_bench(fn, warmup=10, repeat=30)

@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CUDA 编程模型动画：线程、Warp 与内存</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">CUDA 基础交互课</p>
+        <h1>线程与内存模型</h1>
+      </div>
+      <div class="model-path" aria-label="CUDA 编程模型主线">
+        <span>Host</span>
+        <b>→</b>
+        <span>Grid</span>
+        <b>→</b>
+        <span>Block</span>
+        <b>→</b>
+        <span>Warp</span>
+        <b>→</b>
+        <span>Thread</span>
+        <b>→</b>
+        <span>Memory</span>
+      </div>
+    </header>
+
+    <nav class="chapter-tabs" aria-label="CUDA 概念章节">
+      <button class="chapter-tab is-active" data-chapter="launch" type="button">
+        <span>01</span>
+        <strong>线程坐标</strong>
+        <small>Grid / Block / Warp / Thread</small>
+      </button>
+      <button class="chapter-tab" data-chapter="warp" type="button">
+        <span>02</span>
+        <strong>Warp 执行</strong>
+        <small>SIMT / Divergence / Sync</small>
+      </button>
+      <button class="chapter-tab" data-chapter="memory" type="button">
+        <span>03</span>
+        <strong>内存层次</strong>
+        <small>Register / Shared / Global</small>
+      </button>
+    </nav>
+
+    <section class="lesson-strip">
+      <div>
+        <span class="section-label">本章问题</span>
+        <strong id="chapter-question">一个 CUDA kernel 如何产生大量线程？</strong>
+      </div>
+      <p id="chapter-summary">程序员配置 Grid、Block、Thread；硬件再把 Block 内线程按 32 个组成 Warp 执行。</p>
+      <div class="progress-track" aria-label="动画进度">
+        <span id="progress-bar"></span>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <div class="visual-stage">
+        <div class="stage-heading">
+          <div>
+            <span class="section-label" id="phase-label">Kernel launch</span>
+            <h2 id="phase-title">CPU 配置 Grid 和 Block</h2>
+          </div>
+          <span class="step-count" id="step-count">01 / 08</span>
+        </div>
+
+        <section class="chapter-view is-active" id="launch-view" aria-label="线程坐标动画">
+          <div class="launch-flow">
+            <article class="host-panel" id="host-panel">
+              <header>
+                <span>CPU / Host</span>
+                <strong>发起任务</strong>
+              </header>
+              <code>kernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;()</code>
+            </article>
+
+            <div class="flow-arrow" id="launch-arrow" aria-hidden="true"><span></span></div>
+
+            <article class="gpu-panel">
+              <header class="panel-heading">
+                <div>
+                  <span>GPU / Device</span>
+                  <strong>Grid = dim3(3, 2)</strong>
+                </div>
+                <small>共 6 个 Block</small>
+              </header>
+              <div class="grid-map" id="grid-map" aria-label="CUDA Grid"></div>
+            </article>
+          </div>
+
+          <div class="block-detail">
+            <article class="block-zoom">
+              <header class="panel-heading">
+                <div>
+                  <span id="selected-block-label">Block (0, 0)</span>
+                  <strong>blockDim = dim3(8, 8)</strong>
+                </div>
+                <small>点击 Thread 可重新定位</small>
+              </header>
+              <div class="thread-map" id="thread-map" aria-label="Block 内线程"></div>
+            </article>
+
+            <article class="coordinate-panel">
+              <span class="section-label">选中线程</span>
+              <div class="coordinate-value" id="thread-name">Thread (0, 0)</div>
+              <div class="formula-stack">
+                <code>global_x = blockIdx.x × blockDim.x + threadIdx.x</code>
+                <strong id="global-x-formula">0 × 8 + 0 = 0</strong>
+                <code>global_y = blockIdx.y × blockDim.y + threadIdx.y</code>
+                <strong id="global-y-formula">0 × 8 + 0 = 0</strong>
+                <code>linear_tid = threadIdx.y × blockDim.x + threadIdx.x</code>
+                <strong id="linear-thread-formula">0 × 8 + 0 = 0</strong>
+                <code>warp_id = linear_tid ÷ 32；lane_id = linear_tid % 32</code>
+                <strong id="warp-lane-formula">Warp 0，Lane 0</strong>
+              </div>
+              <div class="result-index result-index-stack">
+                <span>全局坐标</span>
+                <b id="global-coordinate">(0, 0)</b>
+                <span>硬件执行分组</span>
+                <b id="warp-coordinate">Warp 0 / Lane 0</b>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="chapter-view" id="warp-view" aria-label="Warp 执行动画">
+          <div class="warp-layout">
+            <article class="warp-machine">
+              <header class="panel-heading">
+                <div>
+                  <span>Warp 0</span>
+                  <strong>32 个线程一起接收指令</strong>
+                </div>
+                <small id="warp-status">等待调度</small>
+              </header>
+              <div class="instruction-rail">
+                <span>当前指令</span>
+                <code id="warp-instruction">y = x + 1</code>
+              </div>
+              <div class="lane-grid" id="lane-grid" aria-label="Warp 的 32 个 lane"></div>
+            </article>
+
+            <article class="scheduler-panel">
+              <span class="section-label">SIMT 调度</span>
+              <div class="scheduler-cycle">
+                <div>
+                  <small>Cycle</small>
+                  <strong id="cycle-number">0</strong>
+                </div>
+                <div>
+                  <small>Active lanes</small>
+                  <strong id="active-lanes">32 / 32</strong>
+                </div>
+              </div>
+              <div class="branch-legend">
+                <span><i class="lane-a"></i>路径 A</span>
+                <span><i class="lane-b"></i>路径 B</span>
+                <span><i class="lane-off"></i>暂时关闭</span>
+              </div>
+              <p id="warp-explanation">SIMT 表示同一条指令同时作用于多个线程，每个线程仍拥有自己的数据和寄存器。</p>
+            </article>
+          </div>
+
+          <div class="sync-demo">
+            <article class="sync-block" data-sync-block="0">
+              <header>Block 0</header>
+              <div class="sync-threads" id="sync-block-0"></div>
+              <div class="barrier-line">__syncthreads()</div>
+            </article>
+            <article class="sync-note">
+              <span class="section-label">同步边界</span>
+              <strong>Barrier 只约束同一个 Block</strong>
+              <p>Block 0 无法用 `__syncthreads()` 等待 Block 1。不同 Block 默认必须独立完成工作。</p>
+            </article>
+            <article class="sync-block" data-sync-block="1">
+              <header>Block 1</header>
+              <div class="sync-threads" id="sync-block-1"></div>
+              <div class="barrier-line">独立执行</div>
+            </article>
+          </div>
+        </section>
+
+        <section class="chapter-view" id="memory-view" aria-label="CUDA 内存模型动画">
+          <div class="memory-device">
+            <header class="panel-heading">
+              <div>
+                <span>GPU Device</span>
+                <strong>内存的归属决定谁能共享数据</strong>
+              </div>
+              <small id="memory-action">等待数据流</small>
+            </header>
+
+            <div class="memory-blocks">
+              <article class="memory-block" data-memory-block="0">
+                <header>Block 0</header>
+                <div class="register-row" id="register-row-0"></div>
+                <div class="shared-bank" id="shared-bank-0">
+                  <span>Shared Memory 0</span>
+                  <div class="shared-cells"></div>
+                </div>
+              </article>
+
+              <article class="memory-block" data-memory-block="1">
+                <header>Block 1</header>
+                <div class="register-row" id="register-row-1"></div>
+                <div class="shared-bank" id="shared-bank-1">
+                  <span>Shared Memory 1</span>
+                  <div class="shared-cells"></div>
+                </div>
+              </article>
+            </div>
+
+            <div class="memory-bus" id="memory-bus">
+              <span></span>
+              <b>Device memory bus</b>
+              <span></span>
+            </div>
+
+            <div class="global-memory" id="global-memory">
+              <header>
+                <span>Global Memory</span>
+                <small>所有 Block 可访问，kernel 结束后数据仍存在</small>
+              </header>
+              <div class="global-cells" id="global-cells"></div>
+            </div>
+          </div>
+
+          <div class="access-demo">
+            <article>
+              <header>
+                <span class="access-good"></span>
+                <strong>合并访问</strong>
+              </header>
+              <div class="address-row" id="coalesced-row"></div>
+              <p>相邻线程访问相邻地址，硬件更容易合并成较少的内存事务。</p>
+            </article>
+            <article>
+              <header>
+                <span class="access-bad"></span>
+                <strong>跨步访问</strong>
+              </header>
+              <div class="address-row" id="strided-row"></div>
+              <p>相邻线程访问分散地址，通常需要更多内存事务。</p>
+            </article>
+          </div>
+        </section>
+
+        <div class="explanation-panel">
+          <span class="section-label">当前结论</span>
+          <code id="concept-code">kernel&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;()</code>
+          <p id="phase-detail">Host 指定 Grid 有多少个 Block，以及每个 Block 有多少个 Thread。</p>
+        </div>
+      </div>
+
+      <aside class="inspector">
+        <section class="control-panel">
+          <div class="control-row">
+            <button class="icon-button" id="reset-button" type="button" title="重置" aria-label="重置">↺</button>
+            <button class="icon-button" id="prev-button" type="button" title="上一步" aria-label="上一步">‹</button>
+            <button class="play-button" id="play-button" type="button" title="播放" aria-label="播放">
+              <span id="play-icon">▶</span>
+            </button>
+            <button class="icon-button" id="next-button" type="button" title="下一步" aria-label="下一步">›</button>
+          </div>
+          <label class="speed-control">
+            <span>速度</span>
+            <input id="speed-input" type="range" min="350" max="1800" value="1050" step="50">
+            <output id="speed-output">1.0×</output>
+          </label>
+        </section>
+
+        <section class="facts-panel">
+          <h2 id="facts-title">层级关系</h2>
+          <dl>
+            <div>
+              <dt id="fact-label-0">一次 launch</dt>
+              <dd id="fact-value-0">产生一个 Grid</dd>
+            </div>
+            <div>
+              <dt id="fact-label-1">Grid</dt>
+              <dd id="fact-value-1">包含多个 Block</dd>
+            </div>
+            <div>
+              <dt id="fact-label-2">Block</dt>
+              <dd id="fact-value-2">包含多个 Thread</dd>
+            </div>
+            <div>
+              <dt id="fact-label-3">Thread</dt>
+              <dd id="fact-value-3">执行一份 kernel 代码</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="mental-model">
+          <h2>记忆主线</h2>
+          <ol>
+            <li class="is-current" data-mental="0">
+              <span>先定位</span>
+              <small>我是哪一个线程？</small>
+            </li>
+            <li data-mental="1">
+              <span>再协作</span>
+              <small>我和谁一起执行？</small>
+            </li>
+            <li data-mental="2">
+              <span>后搬数据</span>
+              <small>数据应该放在哪里？</small>
+            </li>
+          </ol>
+        </section>
+
+        <section class="warning-panel">
+          <h2>容易混淆</h2>
+          <p id="common-mistake">Block 不是一条线程。Block 是一组能够通过 Shared Memory 和同步屏障协作的线程。</p>
+        </section>
+      </aside>
+    </section>
+
+    <section class="cheatsheet">
+      <header>
+        <span class="section-label">完成动画后记住</span>
+        <h2>CUDA kernel 的三条判断线</h2>
+      </header>
+      <div class="cheatsheet-grid">
+        <article data-jump-chapter="launch">
+          <span>01</span>
+          <h3>线程定位</h3>
+          <code>global = blockIdx × blockDim + threadIdx</code>
+          <p>决定当前线程应该处理哪个数据元素。</p>
+        </article>
+        <article data-jump-chapter="warp">
+          <span>02</span>
+          <h3>执行协作</h3>
+          <code>Thread → Warp → Block</code>
+          <p>Warp 负责硬件执行，Block 提供共享与同步边界。</p>
+        </article>
+        <article data-jump-chapter="memory">
+          <span>03</span>
+          <h3>数据放置</h3>
+          <code>Register → Shared → Global</code>
+          <p>越靠近线程越快、越私有；越远容量越大、共享范围越广。</p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>
