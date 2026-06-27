@@ -16,7 +16,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--op", required=True, choices=[
         "gemm_naive", "gemm_tiled", "gemm_tiled_padding", "gemm_regtile2x2", "gemm_regtile4x4",
-        "gemm_vectorized_float4", "gemm_wmma_fp16", "softmax", "layernorm", "rmsnorm", "attention_naive"
+        "gemm_vectorized_float4", "gemm_wmma_fp16",
+        "softmax", "softmax_warp_reduce", "softmax_online",
+        "layernorm", "layernorm_warp_reduce", "layernorm_vectorized",
+        "rmsnorm", "rmsnorm_warp_reduce", "rmsnorm_vectorized",
+        "attention_naive"
     ])
     parser.add_argument("--iters", type=int, default=30)
     args = parser.parse_args()
@@ -40,15 +44,39 @@ def main():
     elif args.op == "softmax":
         x = torch.randn(8192, 4096, device="cuda")
         fn = lambda: ops.softmax_row(x)
+    elif args.op == "softmax_warp_reduce":
+        x = torch.randn(8192, 4096, device="cuda")
+        fn = lambda: ops.softmax_warp_reduce(x)
+    elif args.op == "softmax_online":
+        x = torch.randn(8192, 4096, device="cuda")
+        fn = lambda: ops.softmax_online(x)
     elif args.op == "layernorm":
         x = torch.randn(8192, 4096, device="cuda")
         gamma = torch.randn(4096, device="cuda")
         beta = torch.randn(4096, device="cuda")
         fn = lambda: ops.layernorm_row(x, gamma, beta)
+    elif args.op == "layernorm_warp_reduce":
+        x = torch.randn(8192, 4096, device="cuda")
+        gamma = torch.randn(4096, device="cuda")
+        beta = torch.randn(4096, device="cuda")
+        fn = lambda: ops.layernorm_warp_reduce(x, gamma, beta)
+    elif args.op == "layernorm_vectorized":
+        x = torch.randn(8192, 4096, device="cuda")
+        gamma = torch.randn(4096, device="cuda")
+        beta = torch.randn(4096, device="cuda")
+        fn = lambda: ops.layernorm_vectorized(x, gamma, beta)
     elif args.op == "rmsnorm":
         x = torch.randn(8192, 4096, device="cuda")
         gamma = torch.randn(4096, device="cuda")
         fn = lambda: ops.rmsnorm_row(x, gamma)
+    elif args.op == "rmsnorm_warp_reduce":
+        x = torch.randn(8192, 4096, device="cuda")
+        gamma = torch.randn(4096, device="cuda")
+        fn = lambda: ops.rmsnorm_warp_reduce(x, gamma)
+    elif args.op == "rmsnorm_vectorized":
+        x = torch.randn(8192, 4096, device="cuda")
+        gamma = torch.randn(4096, device="cuda")
+        fn = lambda: ops.rmsnorm_vectorized(x, gamma)
     elif args.op == "attention_naive":
         q = torch.randn(1, 8, 128, 64, device="cuda")
         k = torch.randn_like(q)

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>GEMM 动画：Naive 到 Register Tiling</title>
+  <title>GEMM 动画：Naive 到 WMMA</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -11,7 +11,7 @@
     <header class="topbar">
       <div>
         <p class="eyebrow">CUDA GEMM 学习实验</p>
-        <h1>从 Naive 到 Register Tiling</h1>
+        <h1>从 Naive 到 WMMA</h1>
       </div>
       <div class="formula" aria-label="矩阵乘法公式">
         <span>A[M,K]</span>
@@ -31,9 +31,25 @@
         <span class="mode-index">02</span>
         <span>Tiled</span>
       </button>
-      <button class="mode-tab" data-mode="regtile" type="button">
+      <button class="mode-tab" data-mode="padded" type="button">
         <span class="mode-index">03</span>
+        <span>Padding</span>
+      </button>
+      <button class="mode-tab" data-mode="regtile2" type="button">
+        <span class="mode-index">04</span>
         <span>Regtile 2×2</span>
+      </button>
+      <button class="mode-tab" data-mode="regtile4" type="button">
+        <span class="mode-index">05</span>
+        <span>Regtile 4×4</span>
+      </button>
+      <button class="mode-tab" data-mode="float4" type="button">
+        <span class="mode-index">06</span>
+        <span>Float4</span>
+      </button>
+      <button class="mode-tab" data-mode="wmma" type="button">
+        <span class="mode-index">07</span>
+        <span>WMMA FP16</span>
       </button>
     </nav>
 
@@ -203,9 +219,25 @@
               <span>Block 内复用</span>
               <small>Global → Shared</small>
             </li>
-            <li data-concept="register">
-              <span>线程内复用</span>
-              <small>一个线程计算多个输出</small>
+            <li data-concept="padding">
+              <span>Shared Padding</span>
+              <small>TILE + 1 行跨度</small>
+            </li>
+            <li data-concept="regtile2">
+              <span>Regtile 2×2</span>
+              <small>一个线程计算 4 个输出</small>
+            </li>
+            <li data-concept="regtile4">
+              <span>Regtile 4×4</span>
+              <small>一个线程计算 16 个输出</small>
+            </li>
+            <li data-concept="float4">
+              <span>float4 读取</span>
+              <small>连续 4 列向量化</small>
+            </li>
+            <li data-concept="wmma">
+              <span>Tensor Core</span>
+              <small>Warp 级 WMMA</small>
             </li>
           </ol>
         </section>
@@ -230,11 +262,35 @@
           <p>让线程合作搬运并复用数据。</p>
           <strong>Global → Shared → 计算</strong>
         </article>
-        <article data-jump-mode="regtile">
+        <article data-jump-mode="padded">
           <span class="comparison-number">03</span>
+          <h3>Padding</h3>
+          <p>保持算法不变，调整 shared memory 物理布局。</p>
+          <strong>As/Bs: TILE × (TILE + 1)</strong>
+        </article>
+        <article data-jump-mode="regtile2">
+          <span class="comparison-number">04</span>
           <h3>Regtile 2×2</h3>
           <p>让一次读取完成更多乘加。</p>
           <strong>2 个 A × 2 个 B → 4 个输出</strong>
+        </article>
+        <article data-jump-mode="regtile4">
+          <span class="comparison-number">05</span>
+          <h3>Regtile 4×4</h3>
+          <p>继续扩大线程职责，提高计算密度。</p>
+          <strong>4 个 A × 4 个 B → 16 个输出</strong>
+        </article>
+        <article data-jump-mode="float4">
+          <span class="comparison-number">06</span>
+          <h3>Float4</h3>
+          <p>利用连续列布局，一次读取 B 的 4 个 float。</p>
+          <strong>1 个线程 → 同一行 4 列</strong>
+        </article>
+        <article data-jump-mode="wmma">
+          <span class="comparison-number">07</span>
+          <h3>WMMA FP16</h3>
+          <p>把计算粒度提升到 warp 和 Tensor Core。</p>
+          <strong>1 个 warp → 16 × 16 tile</strong>
         </article>
       </div>
     </section>

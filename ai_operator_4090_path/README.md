@@ -100,9 +100,10 @@ docs/ncu_metrics_animation/index.html
 
 内容包括：
 
-- Duration、SM Throughput、Memory Throughput、DRAM Throughput、Achieved Occupancy
+- Duration、Launch Stats、SM Throughput、Memory Throughput、DRAM Throughput、Achieved Occupancy、Scheduler / Warp Stall、Roofline
+- NCU 报告关键行解码、metric name 命名拆解和 8 个指标的影响关系图
 - Compute-bound、DRAM-bound、低 Occupancy 等典型场景
-- 指标之间的关系和常见误判
+- Scheduler / Warp Stall、Roofline 和 Launch Stats 如何接到诊断动作
 - 阅读 NCU 报告时的推荐诊断顺序
 
 ## 4. Nsight Compute
@@ -116,8 +117,14 @@ bash scripts/profile_ncu.sh gemm_regtile4x4
 bash scripts/profile_ncu.sh gemm_vectorized_float4
 bash scripts/profile_ncu.sh gemm_wmma_fp16
 bash scripts/profile_ncu.sh softmax
+bash scripts/profile_ncu.sh softmax_warp_reduce
+bash scripts/profile_ncu.sh softmax_online
 bash scripts/profile_ncu.sh layernorm
+bash scripts/profile_ncu.sh layernorm_warp_reduce
+bash scripts/profile_ncu.sh layernorm_vectorized
 bash scripts/profile_ncu.sh rmsnorm
+bash scripts/profile_ncu.sh rmsnorm_warp_reduce
+bash scripts/profile_ncu.sh rmsnorm_vectorized
 bash scripts/profile_ncu.sh attention_naive
 ```
 
@@ -160,13 +167,19 @@ docs/phase_map.md
 文件：`src/aiop4090/csrc/softmax.cu`
 
 - `softmax_row`
+- `softmax_warp_reduce`
+- `softmax_online`
 
 ### Norm
 
 文件：`src/aiop4090/csrc/norm.cu`
 
 - `layernorm_row`
+- `layernorm_warp_reduce`
+- `layernorm_vectorized`
 - `rmsnorm_row`
+- `rmsnorm_warp_reduce`
+- `rmsnorm_vectorized`
 
 ### Attention
 

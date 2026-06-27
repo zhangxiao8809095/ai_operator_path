@@ -50,9 +50,15 @@ def bench_softmax_norm():
         cases = [
             ("torch_softmax", lambda: torch.softmax(x, dim=-1)),
             ("softmax_row", lambda: ops.softmax_row(x)),
+            ("softmax_warp_reduce", lambda: ops.softmax_warp_reduce(x)),
+            ("softmax_online", lambda: ops.softmax_online(x)),
             ("torch_layernorm", lambda: torch.nn.functional.layer_norm(x, (cols,), gamma, beta)),
             ("layernorm_row", lambda: ops.layernorm_row(x, gamma, beta)),
+            ("layernorm_warp_reduce", lambda: ops.layernorm_warp_reduce(x, gamma, beta)),
+            ("layernorm_vectorized", lambda: ops.layernorm_vectorized(x, gamma, beta)),
             ("rmsnorm_row", lambda: ops.rmsnorm_row(x, gamma)),
+            ("rmsnorm_warp_reduce", lambda: ops.rmsnorm_warp_reduce(x, gamma)),
+            ("rmsnorm_vectorized", lambda: ops.rmsnorm_vectorized(x, gamma)),
         ]
         for name, fn in cases:
             ms = cuda_bench(fn, warmup=10, repeat=50)

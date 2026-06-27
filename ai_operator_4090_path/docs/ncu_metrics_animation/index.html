@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>NCU 指标动画：从数据到算子瓶颈</title>
+  <title>NCU 指标动画：从报告到算子瓶颈</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -11,14 +11,16 @@
     <header class="topbar">
       <div>
         <p class="eyebrow">Nsight Compute 学习实验</p>
-        <h1>五个指标看懂算子瓶颈</h1>
+        <h1>NCU 指标工作台</h1>
       </div>
       <div class="header-formula" aria-label="性能判断主线">
-        <span>Work</span>
-        <b>÷</b>
-        <span>Duration</span>
+        <span>Profile</span>
         <b>→</b>
-        <span>Performance</span>
+        <span>Signal</span>
+        <b>→</b>
+        <span>Bottleneck</span>
+        <b>→</b>
+        <span>Action</span>
       </div>
     </header>
 
@@ -28,13 +30,18 @@
         <strong>认识指标</strong>
         <small>它们分别在测什么</small>
       </button>
-      <button class="chapter-tab" data-chapter="scenarios" type="button">
+      <button class="chapter-tab" data-chapter="map" type="button">
         <span>02</span>
+        <strong>指标地图</strong>
+        <small>从报告读到根因</small>
+      </button>
+      <button class="chapter-tab" data-chapter="scenarios" type="button">
+        <span>03</span>
         <strong>瓶颈联动</strong>
         <small>指标如何共同变化</small>
       </button>
       <button class="chapter-tab" data-chapter="workflow" type="button">
-        <span>03</span>
+        <span>04</span>
         <strong>诊断顺序</strong>
         <small>看到报告后先看哪里</small>
       </button>
@@ -43,9 +50,9 @@
     <section class="lesson-strip">
       <div>
         <span class="section-label">当前问题</span>
-        <strong id="chapter-question">这五个指标分别回答什么问题？</strong>
+        <strong id="chapter-question">这八个关键指标分别回答什么问题？</strong>
       </div>
-      <p id="chapter-summary">Duration 是最终结果，其余指标用于解释时间花在了哪里，以及 GPU 哪类资源最接近上限。</p>
+      <p id="chapter-summary">Duration 是结果；其余七个指标分别解释计算、内存、并行度、调度、算术强度和启动配置。</p>
       <div class="progress-track" aria-label="动画进度">
         <span id="progress-bar"></span>
       </div>
@@ -58,10 +65,10 @@
             <span class="section-label" id="phase-label">最终结果</span>
             <h2 id="phase-title">Duration：一次 kernel 执行了多久</h2>
           </div>
-          <span class="step-count" id="step-count">01 / 06</span>
+          <span class="step-count" id="step-count">01 / 08</span>
         </div>
 
-        <section class="chapter-view is-active" id="metrics-view" aria-label="五个指标解释">
+        <section class="chapter-view is-active" id="metrics-view" aria-label="八个关键指标解释">
           <div class="metric-dashboard">
             <article class="duration-card metric-card is-focus" data-metric="duration">
               <header>
@@ -135,6 +142,48 @@
                 <b id="occupancy-value">64%</b>
               </div>
             </article>
+
+            <article class="metric-card gauge-card" data-metric="scheduler">
+              <header>
+                <span class="metric-icon metric-scheduler">SCH</span>
+                <div>
+                  <strong>Scheduler / Stall</strong>
+                  <small>eligible warp 与等待原因</small>
+                </div>
+              </header>
+              <div class="gauge" data-gauge="scheduler">
+                <span class="gauge-fill"></span>
+                <b id="scheduler-value">38%</b>
+              </div>
+            </article>
+
+            <article class="metric-card signal-card" data-metric="roofline">
+              <header>
+                <span class="metric-icon metric-roofline">RF</span>
+                <div>
+                  <strong>Roofline</strong>
+                  <small>算术强度与理论边界</small>
+                </div>
+              </header>
+              <div class="signal-value">
+                <b id="roofline-value">Mem side</b>
+                <span>AI = 2.1 FLOP/B</span>
+              </div>
+            </article>
+
+            <article class="metric-card signal-card" data-metric="launch">
+              <header>
+                <span class="metric-icon metric-launch">L</span>
+                <div>
+                  <strong>Launch Stats</strong>
+                  <small>grid / block / regs / smem</small>
+                </div>
+              </header>
+              <div class="signal-value">
+                <b id="launch-value">Regs</b>
+                <span>occupancy limiter</span>
+              </div>
+            </article>
           </div>
 
           <div class="gpu-story">
@@ -177,6 +226,185 @@
               <span class="section-label">注意</span>
               <p id="metric-warning">不要用不同 shape、不同算法或不同精度的 Duration 直接下结论。</p>
             </div>
+          </div>
+        </section>
+
+        <section class="chapter-view" id="map-view" aria-label="NCU 指标关系地图">
+          <div class="map-layout">
+            <article class="report-panel">
+              <header class="panel-heading">
+                <div>
+                  <span>NCU Summary</span>
+                  <strong>先把报告折成几类信号</strong>
+                </div>
+                <small>speed-of-light / full</small>
+              </header>
+
+              <div class="report-table" aria-label="NCU 报告关键行">
+                <button class="report-row is-active" data-report-row="duration" type="button">
+                  <span>Duration</span>
+                  <b>1.80 ms</b>
+                  <small>最终结果</small>
+                </button>
+                <button class="report-row" data-report-row="launch" type="button">
+                  <span>Launch Stats</span>
+                  <b>regs</b>
+                  <small>并行度上限</small>
+                </button>
+                <button class="report-row" data-report-row="sm" type="button">
+                  <span>SM Throughput</span>
+                  <b>82%</b>
+                  <small>计算侧压力</small>
+                </button>
+                <button class="report-row" data-report-row="memory" type="button">
+                  <span>Memory Throughput</span>
+                  <b>36%</b>
+                  <small>内存系统压力</small>
+                </button>
+                <button class="report-row" data-report-row="dram" type="button">
+                  <span>DRAM Throughput</span>
+                  <b>28%</b>
+                  <small>定位片外显存</small>
+                </button>
+                <button class="report-row" data-report-row="occupancy" type="button">
+                  <span>Achieved Occupancy</span>
+                  <b>64%</b>
+                  <small>解释延迟隐藏</small>
+                </button>
+                <button class="report-row" data-report-row="scheduler" type="button">
+                  <span>Eligible Warps / Stalls</span>
+                  <b>低 / 高</b>
+                  <small>展开到调度原因</small>
+                </button>
+                <button class="report-row" data-report-row="roofline" type="button">
+                  <span>Roofline</span>
+                  <b>Mem side</b>
+                  <small>优化方向</small>
+                </button>
+              </div>
+            </article>
+
+            <article class="relation-panel">
+              <header class="panel-heading">
+                <div>
+                  <span>指标影响关系</span>
+                  <strong id="map-title">Duration 是最终账单</strong>
+                </div>
+                <small id="map-tag">Result</small>
+              </header>
+
+              <div class="relation-board" aria-label="指标关系图">
+                <div class="relation-row" data-path="latency">
+                  <div class="relation-node" data-node="launch">
+                    <span>Launch Stats</span>
+                    <strong>grid / block / regs / smem</strong>
+                  </div>
+                  <div class="relation-arrow" data-edge="launch-occupancy">→</div>
+                  <div class="relation-node" data-node="occupancy">
+                    <span>Occupancy</span>
+                    <strong>active warps capacity</strong>
+                  </div>
+                  <div class="relation-arrow" data-edge="occupancy-scheduler">→</div>
+                  <div class="relation-node" data-node="scheduler">
+                    <span>Scheduler</span>
+                    <strong>eligible / issued warps</strong>
+                  </div>
+                  <div class="relation-arrow" data-edge="scheduler-duration">→</div>
+                  <div class="relation-node" data-node="duration">
+                    <span>Duration</span>
+                    <strong>kernel wall time</strong>
+                  </div>
+                </div>
+
+                <div class="relation-row" data-path="compute">
+                  <div class="relation-node" data-node="instructions">
+                    <span>Instruction Mix</span>
+                    <strong>FMA / Tensor / SFU / branch</strong>
+                  </div>
+                  <div class="relation-arrow" data-edge="instructions-sm">→</div>
+                  <div class="relation-node" data-node="sm">
+                    <span>SM Throughput</span>
+                    <strong>compute SOL pressure</strong>
+                  </div>
+                  <div class="relation-arrow" data-edge="sm-duration">→</div>
+                  <div class="relation-node" data-node="compute-bound">
+                    <span>Compute-bound</span>
+                    <strong>算力侧接近上限</strong>
+                  </div>
+                  <div class="relation-arrow" data-edge="compute-bound-duration">→</div>
+                  <div class="relation-node" data-node="duration">
+                    <span>Duration</span>
+                    <strong>受计算吞吐约束</strong>
+                  </div>
+                </div>
+
+                <div class="relation-row" data-path="memory">
+                  <div class="relation-node" data-node="requests">
+                    <span>Memory Requests</span>
+                    <strong>load / store / atomic</strong>
+                  </div>
+                  <div class="relation-arrow" data-edge="requests-hierarchy">→</div>
+                  <div class="relation-node" data-node="hierarchy">
+                    <span>L1 / L2 / Shared</span>
+                    <strong>hit rate / bank / pipe</strong>
+                  </div>
+                  <div class="relation-arrow" data-edge="hierarchy-dram">→</div>
+                  <div class="relation-node" data-node="dram">
+                    <span>DRAM Throughput</span>
+                    <strong>off-chip bandwidth</strong>
+                  </div>
+                  <div class="relation-arrow" data-edge="dram-duration">→</div>
+                  <div class="relation-node" data-node="duration">
+                    <span>Duration</span>
+                    <strong>受数据移动约束</strong>
+                  </div>
+                </div>
+
+                <div class="relation-row" data-path="roofline">
+                  <div class="relation-node" data-node="bytes">
+                    <span>Arithmetic Intensity</span>
+                    <strong>FLOPs per byte</strong>
+                  </div>
+                  <div class="relation-arrow" data-edge="bytes-roofline">→</div>
+                  <div class="relation-node" data-node="roofline">
+                    <span>Roofline</span>
+                    <strong>memory side / compute side</strong>
+                  </div>
+                  <div class="relation-arrow" data-edge="roofline-action">→</div>
+                  <div class="relation-node" data-node="action">
+                    <span>Optimization Action</span>
+                    <strong>复用 / 向量化 / Tensor Core</strong>
+                  </div>
+                  <div class="relation-arrow" data-edge="action-duration">→</div>
+                  <div class="relation-node" data-node="duration">
+                    <span>Duration</span>
+                    <strong>优化是否生效</strong>
+                  </div>
+                </div>
+              </div>
+
+              <div class="metric-name-card">
+                <span class="section-label">Metric name 解码</span>
+                <code id="metric-name">gpu__time_duration.sum</code>
+                <div class="metric-token-row" id="metric-token-row" aria-label="metric name token"></div>
+              </div>
+            </article>
+
+            <article class="map-insight">
+              <span class="section-label">当前读法</span>
+              <h3 id="map-signal">先把 Duration 当成最终结果</h3>
+              <p id="map-inference">所有优化都要回到相同输入下的执行时间。其他百分比负责解释为什么变快或变慢。</p>
+              <dl>
+                <div>
+                  <dt>下一眼看</dt>
+                  <dd id="map-next">SM / Memory 谁最高</dd>
+                </div>
+                <div>
+                  <dt>常见误判</dt>
+                  <dd id="map-trap">吞吐百分比不能相加，也不能脱离 Duration 单独评价。</dd>
+                </div>
+              </dl>
+            </article>
           </div>
         </section>
 
@@ -223,6 +451,21 @@
                 <div class="warp-grid" id="scenario-warps"></div>
               </div>
 
+              <div class="scenario-signal-grid">
+                <div>
+                  <span>Launch</span>
+                  <b id="scenario-launch">enough grid</b>
+                </div>
+                <div>
+                  <span>Scheduler / Stall</span>
+                  <b id="scenario-scheduler">math pipe</b>
+                </div>
+                <div>
+                  <span>Roofline</span>
+                  <b id="scenario-roofline">compute side</b>
+                </div>
+              </div>
+
               <div class="duration-result">
                 <span>最终 Duration</span>
                 <strong><b id="scenario-duration">2.40</b> ms</strong>
@@ -266,28 +509,53 @@
                 <small>优化是否真的变快？</small>
               </div>
             </article>
-            <div class="workflow-arrow">→</div>
             <article class="workflow-step" data-workflow-step="1">
               <span>2</span>
               <div>
-                <strong>比较 SM 与 Memory</strong>
-                <small>哪类资源更接近峰值？</small>
+                <strong>看 Launch Stats</strong>
+                <small>并行规模和资源上限</small>
               </div>
             </article>
-            <div class="workflow-arrow">→</div>
             <article class="workflow-step" data-workflow-step="2">
               <span>3</span>
               <div>
-                <strong>拆开看 DRAM</strong>
-                <small>压力是否来自片外显存？</small>
+                <strong>看 SM Throughput</strong>
+                <small>计算侧是否接近峰值？</small>
               </div>
             </article>
-            <div class="workflow-arrow">→</div>
             <article class="workflow-step" data-workflow-step="3">
               <span>4</span>
               <div>
-                <strong>用 Occupancy 解释低吞吐</strong>
-                <small>是否缺少 Warp 隐藏延迟？</small>
+                <strong>看 Memory Throughput</strong>
+                <small>内存系统是否接近峰值？</small>
+              </div>
+            </article>
+            <article class="workflow-step" data-workflow-step="4">
+              <span>5</span>
+              <div>
+                <strong>拆 DRAM</strong>
+                <small>是否是片外显存？</small>
+              </div>
+            </article>
+            <article class="workflow-step" data-workflow-step="5">
+              <span>6</span>
+              <div>
+                <strong>查 Occupancy</strong>
+                <small>Warp 驻留够不够？</small>
+              </div>
+            </article>
+            <article class="workflow-step" data-workflow-step="6">
+              <span>7</span>
+              <div>
+                <strong>查 Scheduler / Stall</strong>
+                <small>为何发不出指令？</small>
+              </div>
+            </article>
+            <article class="workflow-step" data-workflow-step="7">
+              <span>8</span>
+              <div>
+                <strong>用 Roofline 定方向</strong>
+                <small>复用、带宽还是算力？</small>
               </div>
             </article>
           </div>
@@ -320,20 +588,36 @@
 
           <div class="interpretation-grid">
             <article>
-              <strong>SM 高</strong>
-              <p>优先检查计算指令、Tensor Core、流水线和依赖。</p>
+              <strong>Duration</strong>
+              <p>只用相同输入和相同语义比较，判断优化是否真的有效。</p>
             </article>
             <article>
-              <strong>Memory / DRAM 高</strong>
-              <p>优先检查数据复用、合并访问、缓存和传输字节数。</p>
+              <strong>Launch Stats</strong>
+              <p>排查 grid 太小、block 不合适、寄存器或 Shared Memory 限制。</p>
             </article>
             <article>
-              <strong>所有 Throughput 都低</strong>
-              <p>检查并行度、Occupancy、Warp Stall、工作量是否太小。</p>
+              <strong>SM Throughput</strong>
+              <p>高时优先检查计算指令、Tensor Core、流水线和依赖。</p>
             </article>
             <article>
-              <strong>Occupancy 高但仍慢</strong>
-              <p>不要继续追 Occupancy，真正瓶颈可能是计算或带宽。</p>
+              <strong>Memory Throughput</strong>
+              <p>高时展开缓存、Shared Memory、内存管线和访问形态。</p>
+            </article>
+            <article>
+              <strong>DRAM Throughput</strong>
+              <p>高时优先减少片外传输字节数，提高片上复用。</p>
+            </article>
+            <article>
+              <strong>Occupancy</strong>
+              <p>低时检查延迟隐藏能力，但不要把它当最终目标。</p>
+            </article>
+            <article>
+              <strong>Scheduler / Stall</strong>
+              <p>当 issue 发不满时，用 stall reason 找等待来源。</p>
+            </article>
+            <article>
+              <strong>Roofline</strong>
+              <p>决定下一步更该提复用、减字节，还是提高计算吞吐。</p>
             </article>
           </div>
         </section>
@@ -365,10 +649,14 @@
         <section class="rule-panel">
           <h2>先记住</h2>
           <ul id="rule-list">
-            <li>Duration 才是最终性能结果</li>
-            <li>Throughput 看谁更接近理论峰值</li>
-            <li>高利用率不自动等于高效率</li>
-            <li>Occupancy 用于解释延迟隐藏能力</li>
+            <li>Duration 是最终性能结果</li>
+            <li>Launch Stats 决定并行规模和理论上限</li>
+            <li>SM / Memory 先判断压力方向</li>
+            <li>DRAM 用来确认片外显存瓶颈</li>
+            <li>Occupancy 看延迟隐藏能力</li>
+            <li>Scheduler / Stall 找发不出指令的原因</li>
+            <li>Roofline 把优化方向压成复用或算力</li>
+            <li>所有判断都要回到 Duration</li>
           </ul>
         </section>
 
@@ -391,6 +679,13 @@
           </div>
         </section>
 
+        <section class="command-panel">
+          <h2>常用采样</h2>
+          <code>ncu --set speed-of-light</code>
+          <code>ncu --set full</code>
+          <code>ncu --metrics breakdown:sm__throughput</code>
+        </section>
+
         <section class="warning-panel">
           <h2>避免误判</h2>
           <p id="common-mistake">不要把 SM Throughput、Memory Throughput 和 DRAM Throughput 相加，它们不是同一份预算的分项百分比。</p>
@@ -401,7 +696,7 @@
     <section class="cheatsheet">
       <header>
         <span class="section-label">一眼判断</span>
-        <h2>五个指标的最短记忆法</h2>
+        <h2>关键指标的最短记忆法</h2>
       </header>
       <div class="cheatsheet-grid">
         <article data-jump-chapter="metrics">
@@ -429,9 +724,28 @@
           <h3>Occupancy</h3>
           <p>有多少 Warp 驻留以隐藏延迟。</p>
         </article>
+        <article data-jump-chapter="map">
+          <span>SCH</span>
+          <h3>Scheduler / Stall</h3>
+          <p>Eligible Warps 够不够，等待卡在哪里。</p>
+        </article>
+        <article data-jump-chapter="map">
+          <span>RF</span>
+          <h3>Roofline</h3>
+          <p>算术强度把 kernel 推向内存侧或计算侧。</p>
+        </article>
+        <article data-jump-chapter="workflow">
+          <span>L</span>
+          <h3>Launch Stats</h3>
+          <p>grid、block、寄存器和 Shared Memory 决定并行度上限。</p>
+        </article>
       </div>
       <p class="source-note">
-        指标解释依据 NVIDIA Nsight Compute Profiling Guide；具体子指标组成可能随 GPU 架构和报告 section 变化。
+        指标解释依据
+        <a href="https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html">NVIDIA Nsight Compute Profiling Guide</a>
+        和
+        <a href="https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html">Nsight Compute CLI 文档</a>；
+        具体子指标组成可能随 GPU 架构、NCU 版本和报告 section 变化。
       </p>
     </section>
   </main>

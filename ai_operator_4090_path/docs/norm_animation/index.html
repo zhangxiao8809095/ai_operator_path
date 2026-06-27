@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Norm 动画：由易到难看懂 norm.cu</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">CUDA Norm 学习实验</p>
+        <h1>由易到难看懂 norm.cu</h1>
+      </div>
+      <div class="formula" aria-label="归一化公式">
+        <span>row-wise</span>
+        <strong>normalize</strong>
+        <span>X[rows, cols]</span>
+      </div>
+    </header>
+
+    <nav class="mode-tabs" aria-label="Norm 实现选择">
+      <button class="mode-tab is-active" data-mode="launcher" type="button">
+        <span class="mode-index">01</span>
+        <span>Host Launcher</span>
+      </button>
+      <button class="mode-tab" data-mode="rmsnorm" type="button">
+        <span class="mode-index">02</span>
+        <span>RMSNorm Kernel</span>
+      </button>
+      <button class="mode-tab" data-mode="layernorm" type="button">
+        <span class="mode-index">03</span>
+        <span>LayerNorm Kernel</span>
+      </button>
+    </nav>
+
+    <section class="lesson-strip">
+      <div>
+        <span class="lesson-label">当前视角</span>
+        <strong id="mode-title">Host Launcher：检查输入并启动 kernel</strong>
+      </div>
+      <p id="mode-summary">先从 C++ 包装函数开始：检查 tensor、分配输出，然后用 rows 个 block 启动 GPU 代码。</p>
+      <div class="progress-track" aria-label="动画进度">
+        <span id="progress-bar"></span>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <div class="visual-stage">
+        <div class="stage-heading">
+          <div>
+            <span class="stage-kicker" id="phase-label">入口</span>
+            <h2 id="phase-title">Python 调用进入 C++ wrapper</h2>
+          </div>
+          <span class="step-count" id="step-count">01 / 08</span>
+        </div>
+
+        <section class="pipeline">
+          <article class="pipe-node" data-zone="host">
+            <span>CPU / PyTorch</span>
+            <strong id="host-state">检查输入</strong>
+          </article>
+          <div class="pipe-arrow" id="host-arrow" aria-hidden="true"><span></span></div>
+          <article class="pipe-node" data-zone="grid">
+            <span>CUDA Grid</span>
+            <strong id="grid-state">rows 个 block</strong>
+          </article>
+          <div class="pipe-arrow" id="grid-arrow" aria-hidden="true"><span></span></div>
+          <article class="pipe-node" data-zone="block">
+            <span>Block</span>
+            <strong id="block-state">256 threads</strong>
+          </article>
+        </section>
+
+        <section class="data-scene">
+          <article class="matrix-panel">
+            <div class="matrix-title">
+              <span class="matrix-name matrix-x">X</span>
+              <span>3 × 8 示例</span>
+            </div>
+            <div class="matrix-grid" id="matrix-x" aria-label="输入矩阵 X"></div>
+          </article>
+
+          <article class="vector-panel">
+            <div class="matrix-title">
+              <span class="matrix-name matrix-g">γ</span>
+              <span>gamma[col]</span>
+            </div>
+            <div class="vector-grid" id="vector-gamma" aria-label="gamma 向量"></div>
+
+            <div class="matrix-title beta-title">
+              <span class="matrix-name matrix-b">β</span>
+              <span>beta[col]</span>
+            </div>
+            <div class="vector-grid" id="vector-beta" aria-label="beta 向量"></div>
+          </article>
+
+          <article class="matrix-panel">
+            <div class="matrix-title">
+              <span class="matrix-name matrix-y">Y</span>
+              <span>输出</span>
+            </div>
+            <div class="matrix-grid" id="matrix-y" aria-label="输出矩阵 Y"></div>
+          </article>
+        </section>
+
+        <section class="thread-scene">
+          <div class="section-title">
+            <span class="stage-kicker">Block 内线程</span>
+            <strong id="thread-caption">动画用 8 个 lane 表示真实代码中的 256 个线程</strong>
+          </div>
+          <div class="thread-lanes" id="thread-lanes" aria-label="线程分工"></div>
+        </section>
+
+        <section class="memory-scene">
+          <article class="memory-zone">
+            <div class="zone-title">
+              <span class="zone-dot"></span>
+              Shared Memory smem[tid]
+            </div>
+            <div class="smem-grid" id="smem-grid" aria-label="shared memory"></div>
+          </article>
+          <article class="stat-zone">
+            <span class="stage-kicker">当前统计量</span>
+            <dl id="stat-list"></dl>
+          </article>
+        </section>
+
+        <div class="calculation-panel">
+          <span class="calculation-label">当前计算</span>
+          <code id="calculation">mean = sum(row) / cols</code>
+          <p id="phase-detail">每个 block 负责一行，block 内线程分工处理这一行的不同列。</p>
+        </div>
+
+        <article class="source-panel">
+          <header>
+            <div>
+              <span class="stage-kicker">同步源码</span>
+              <strong id="source-location">norm.cu:75-88</strong>
+            </div>
+            <a id="source-link" href="../../src/aiop4090/csrc/norm.cu">打开 norm.cu</a>
+          </header>
+          <div class="source-body">
+            <pre id="source-code" aria-label="当前步骤对应的 norm.cu 源码"></pre>
+            <div class="source-explanation">
+              <span class="stage-kicker">动画如何对应代码</span>
+              <p id="source-explanation">wrapper 负责检查输入、分配输出，并启动 CUDA kernel。</p>
+            </div>
+          </div>
+        </article>
+      </div>
+
+      <aside class="inspector">
+        <section class="control-panel">
+          <div class="control-row">
+            <button class="icon-button" id="reset-button" type="button" title="重置动画" aria-label="重置动画">↺</button>
+            <button class="icon-button" id="prev-button" type="button" title="上一步" aria-label="上一步">‹</button>
+            <button class="play-button" id="play-button" type="button" title="播放" aria-label="播放">
+              <span id="play-icon">▶</span>
+            </button>
+            <button class="icon-button" id="next-button" type="button" title="下一步" aria-label="下一步">›</button>
+          </div>
+          <label class="speed-control">
+            <span>速度</span>
+            <input id="speed-input" type="range" min="350" max="1800" value="1050" step="50">
+            <output id="speed-output">1.0×</output>
+          </label>
+        </section>
+
+        <section class="stats-panel">
+          <h2>这一版在学什么</h2>
+          <dl>
+            <div>
+              <dt>函数</dt>
+              <dd id="stat-function">layernorm_row_kernel</dd>
+            </div>
+            <div>
+              <dt>并行单位</dt>
+              <dd id="stat-unit">1 block / row</dd>
+            </div>
+            <div>
+              <dt>核心动作</dt>
+              <dd id="stat-action">两次 reduction</dd>
+            </div>
+            <div>
+              <dt>输出公式</dt>
+              <dd id="stat-formula">norm * gamma + beta</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="concept-panel">
+          <h2>概念阶梯</h2>
+          <ol>
+            <li class="is-current">
+              <span>行级任务</span>
+              <small>blockIdx.x 选择 row</small>
+            </li>
+            <li>
+              <span>线程分工</span>
+              <small>tid 跨步扫 cols</small>
+            </li>
+            <li>
+              <span>Shared Memory</span>
+              <small>保存局部和</small>
+            </li>
+            <li>
+              <span>Reduction</span>
+              <small>局部结果合成统计量</small>
+            </li>
+            <li>
+              <span>Normalize</span>
+              <small>写回 Y</small>
+            </li>
+          </ol>
+        </section>
+      </aside>
+    </section>
+
+    <section class="comparison-band">
+      <header>
+        <span class="stage-kicker">函数地图</span>
+        <h2>norm.cu 的函数分成 GPU kernel 和 CPU wrapper 两层</h2>
+      </header>
+      <div class="comparison-grid">
+          <article data-jump-mode="launcher">
+            <span class="comparison-number">01</span>
+            <h3>layernorm_row / rmsnorm_row</h3>
+            <p>检查输入、创建输出，配置 rows 个 block 和 256 个线程。</p>
+            <strong>&lt;&lt;&lt;rows, 256, smem&gt;&gt;&gt;</strong>
+          </article>
+          <article data-jump-mode="rmsnorm">
+            <span class="comparison-number">02</span>
+            <h3>rmsnorm_row_kernel</h3>
+            <p>不减 mean，只用平方均值做缩放。</p>
+            <strong>sum(x²) → scale</strong>
+          </article>
+          <article data-jump-mode="layernorm">
+            <span class="comparison-number">03</span>
+            <h3>layernorm_row_kernel</h3>
+            <p>一个 block 处理一行，先求 mean，再求 variance。</p>
+            <strong>sum → var → affine</strong>
+          </article>
+      </div>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>

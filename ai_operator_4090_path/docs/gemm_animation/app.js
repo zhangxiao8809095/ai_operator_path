@@ -13,248 +13,261 @@ const matrices = {
   ],
 };
 
-matrices.C = matrices.A.map((row, i) =>
+matrices.C = matrices.A.map((row) =>
   matrices.B[0].map((_, j) =>
     row.reduce((sum, value, k) => sum + value * matrices.B[k][j], 0)
   )
 );
 
-const modeConfig = {
-  naive: {
-    title: "一个线程计算一个输出",
-    summary: "线程直接从 Global Memory 读取 A 的一行和 B 的一列，完成一个点积。",
-    stats: ["1 个 C 元素", "每次乘加都读取", "几乎没有", "16 × 16 输出"],
-    concept: 0,
-  },
-  tiled: {
-    title: "一个 Block 协作加载并复用 Tile",
-    summary: "线程先把 A/B 小块搬进 Shared Memory，再共同使用这份数据完成多个输出。",
-    stats: ["1 个 C 元素", "每个 Tile 协作读取一次", "Block 内复用", "16 × 16 输出"],
-    concept: 1,
-  },
-  regtile: {
-    title: "一个线程计算相邻 2×2 输出",
-    summary: "线程从 Shared Memory 读取 2 个 A 和 2 个 B，在寄存器中组合成 4 次乘加。",
-    stats: ["4 个 C 元素", "按 Tile 协作读取", "Block 内 + 线程内", "32 × 32 输出"],
-    concept: 2,
-  },
-};
-
 function rangeCells(matrix, coordinates, className) {
   return coordinates.map(([row, col]) => ({ matrix, row, col, className }));
+}
+
+function blockCells(rowStart, rowEnd, colStart, colEnd) {
+  const cells = [];
+  for (let row = rowStart; row <= rowEnd; row += 1) {
+    for (let col = colStart; col <= colEnd; col += 1) {
+      cells.push([row, col]);
+    }
+  }
+  return cells;
 }
 
 function sourceLine(number, text, active = false) {
   return { number, text, active };
 }
 
-const sourceByMode = {
-  naive: [
-    {
-      location: "gemm.cu:11-15",
-      explanation: "动画中选中的 C[0,0] 对应 row=0、col=0；acc 是当前线程私有的寄存器累加器。",
-      lines: [
-        sourceLine(11, "int row = blockIdx.y * blockDim.y + threadIdx.y;", true),
-        sourceLine(12, "int col = blockIdx.x * blockDim.x + threadIdx.x;", true),
-        sourceLine(13, "if (row >= M || col >= N) return;"),
-        sourceLine(15, "float acc = 0.0f;", true),
-      ],
-    },
-    ...[0, 1, 2, 3].map((k) => ({
-      location: "gemm.cu:16-17",
-      explanation: `动画把循环展开到 k=${k}。代码每轮直接从 Global Memory 读取 A[row,k] 和 B[k,col]，再累加到 acc。`,
-      lines: [
-        sourceLine(16, "for (int k = 0; k < K; ++k) {", true),
-        sourceLine(17, "    acc += A[row * K + k] * B[k * N + col];", true),
-        sourceLine(18, "}"),
-      ],
-    })),
-    {
-      location: "gemm.cu:19",
-      explanation: "动画中 C[0,0] 从圆点变成最终数值，对应线程把寄存器 acc 写回 Global Memory 中的 C。",
-      lines: [
-        sourceLine(19, "C[row * N + col] = acc;", true),
-      ],
-    },
-    {
-      location: "gemm.cu:11-19, 122-124",
-      explanation: "Host 端用 16×16 线程组成 Block；kernel 中每个线程定位并计算一个输出，所以一个 Block 覆盖 16×16 个 C 元素。",
-      lines: [
-        sourceLine(11, "int row = blockIdx.y * blockDim.y + threadIdx.y;"),
-        sourceLine(12, "int col = blockIdx.x * blockDim.x + threadIdx.x;"),
-        sourceLine(16, "for (int k = 0; k < K; ++k) {"),
-        sourceLine(17, "    acc += A[row * K + k] * B[k * N + col];", true),
-        sourceLine(19, "C[row * N + col] = acc;"),
-        sourceLine(122, "dim3 block(16, 16);", true),
-        sourceLine(123, "dim3 grid(ceil_div_int(N, block.x), ceil_div_int(M, block.y));"),
-        sourceLine(124, "gemm_naive_kernel<<<grid, block>>>(A.data_ptr<float>(), B.data_ptr<float>(), C.data_ptr<float>(), M, N, K);", true),
-      ],
-    },
-  ],
-  tiled: [
-    {
-      location: "gemm.cu:22, 28-35, 134-136",
-      explanation: "TILE=16 决定 Shared Memory 小块、线程 Block 和输出 Tile 的尺寸；动画为便于观察缩小成 2×2。",
-      lines: [
-        sourceLine(22, "constexpr int TILE = 16;", true),
-        sourceLine(28, "__shared__ float As[TILE][TILE];", true),
-        sourceLine(29, "__shared__ float Bs[TILE][TILE];", true),
-        sourceLine(31, "int row = blockIdx.y * TILE + threadIdx.y;"),
-        sourceLine(32, "int col = blockIdx.x * TILE + threadIdx.x;"),
-        sourceLine(35, "for (int t = 0; t < K; t += TILE) {"),
-        sourceLine(134, "dim3 block(TILE, TILE);", true),
-        sourceLine(136, "gemm_tiled_kernel<<<grid, block>>>(A.data_ptr<float>(), B.data_ptr<float>(), C.data_ptr<float>(), M, N, K);"),
-      ],
-    },
-    {
-      location: "gemm.cu:35-39",
-      explanation: "动画中的 Global→Shared 搬运对应每个线程各加载一个 A 元素和一个 B 元素，越界位置填 0。",
-      lines: [
-        sourceLine(35, "for (int t = 0; t < K; t += TILE) {"),
-        sourceLine(36, "    int a_col = t + threadIdx.x;"),
-        sourceLine(37, "    int b_row = t + threadIdx.y;"),
-        sourceLine(38, "    As[threadIdx.y][threadIdx.x] = (row < M && a_col < K) ? A[row * K + a_col] : 0.0f;", true),
-        sourceLine(39, "    Bs[threadIdx.y][threadIdx.x] = (b_row < K && col < N) ? B[b_row * N + col] : 0.0f;", true),
-      ],
-    },
-    {
-      location: "gemm.cu:40",
-      explanation: "动画中的等待屏障就是这次 __syncthreads()：确保 As/Bs 已被整个 Block 完整写入。",
-      lines: [
-        sourceLine(38, "As[threadIdx.y][threadIdx.x] = (row < M && a_col < K) ? A[row * K + a_col] : 0.0f;"),
-        sourceLine(39, "Bs[threadIdx.y][threadIdx.x] = (b_row < K && col < N) ? B[b_row * N + col] : 0.0f;"),
-        sourceLine(40, "__syncthreads();", true),
-      ],
-    },
-    {
-      location: "gemm.cu:42-45",
-      explanation: "动画中多个输出线程复用同一 Tile，对应每个线程从 Shared Memory 读取自己需要的一行 As 和一列 Bs。",
-      lines: [
-        sourceLine(42, "#pragma unroll"),
-        sourceLine(43, "for (int kk = 0; kk < TILE; ++kk) {", true),
-        sourceLine(44, "    acc += As[threadIdx.y][kk] * Bs[kk][threadIdx.x];", true),
-        sourceLine(45, "}"),
-      ],
-    },
-    {
-      location: "gemm.cu:35-46",
-      explanation: "动画进入下一个 K Tile，对应 t 增加 TILE；Shared Memory 被下一块数据覆盖，acc 保留并继续累加。",
-      lines: [
-        sourceLine(35, "for (int t = 0; t < K; t += TILE) {", true),
-        sourceLine(38, "    As[threadIdx.y][threadIdx.x] = (row < M && a_col < K) ? A[row * K + a_col] : 0.0f;"),
-        sourceLine(39, "    Bs[threadIdx.y][threadIdx.x] = (b_row < K && col < N) ? B[b_row * N + col] : 0.0f;"),
-        sourceLine(44, "    acc += As[threadIdx.y][kk] * Bs[kk][threadIdx.x];", true),
-        sourceLine(46, "    __syncthreads();"),
-        sourceLine(47, "}"),
-      ],
-    },
-    {
-      location: "gemm.cu:49",
-      explanation: "动画中的四个输出由四个线程分别写回；每个线程仍只持有一个 acc，并在边界检查后写入 C。",
-      lines: [
-        sourceLine(49, "if (row < M && col < N) C[row * N + col] = acc;", true),
-      ],
-    },
-    {
-      location: "gemm.cu:28-49",
-      explanation: "完整 Tiled 数据流：Global Memory 协作加载到 As/Bs，Block 同步，Shared Memory 中复用，最后写回 C。",
-      lines: [
-        sourceLine(28, "__shared__ float As[TILE][TILE];", true),
-        sourceLine(29, "__shared__ float Bs[TILE][TILE];", true),
-        sourceLine(38, "As[threadIdx.y][threadIdx.x] = (row < M && a_col < K) ? A[row * K + a_col] : 0.0f;"),
-        sourceLine(39, "Bs[threadIdx.y][threadIdx.x] = (b_row < K && col < N) ? B[b_row * N + col] : 0.0f;"),
-        sourceLine(40, "__syncthreads();"),
-        sourceLine(44, "acc += As[threadIdx.y][kk] * Bs[kk][threadIdx.x];", true),
-        sourceLine(49, "C[row * N + col] = acc;"),
-      ],
-    },
-  ],
-  regtile: [
-    {
-      location: "gemm.cu:54-70",
-      explanation: "RM=RN=2 让一个线程负责 2×2 输出。base_row/base_col 定位该线程负责区域，四个 acc 保存四个结果。",
-      lines: [
-        sourceLine(54, "constexpr int RT_TILE = 16;"),
-        sourceLine(55, "constexpr int RM = 2;", true),
-        sourceLine(56, "constexpr int RN = 2;", true),
-        sourceLine(67, "int base_row = blockIdx.y * (RT_TILE * RM) + local_row * RM;", true),
-        sourceLine(68, "int base_col = blockIdx.x * (RT_TILE * RN) + local_col * RN;", true),
-        sourceLine(70, "float acc00 = 0.0f, acc01 = 0.0f, acc10 = 0.0f, acc11 = 0.0f;", true),
-      ],
-    },
-    {
-      location: "gemm.cu:87-92",
-      explanation: "动画中的 a0/a1/b0/b1 正是代码从 Shared Memory 读取的两个 A 值和两个 B 值。",
-      lines: [
-        sourceLine(87, "#pragma unroll"),
-        sourceLine(88, "for (int kk = 0; kk < RT_TILE; ++kk) {"),
-        sourceLine(89, "    float a0 = As[local_row * RM + 0][kk];", true),
-        sourceLine(90, "    float a1 = As[local_row * RM + 1][kk];", true),
-        sourceLine(91, "    float b0 = Bs[kk][local_col * RN + 0];", true),
-        sourceLine(92, "    float b1 = Bs[kk][local_col * RN + 1];", true),
-      ],
-    },
-    {
-      location: "gemm.cu:93-96",
-      explanation: "动画中的四种组合逐行对应四个 FMA 累加，每个 a 值和 b 值在当前线程内被复用两次。",
-      lines: [
-        sourceLine(93, "acc00 += a0 * b0;", true),
-        sourceLine(94, "acc01 += a0 * b1;", true),
-        sourceLine(95, "acc10 += a1 * b0;", true),
-        sourceLine(96, "acc11 += a1 * b1;", true),
-      ],
-    },
-    {
-      location: "gemm.cu:72, 87-98",
-      explanation: "外层 t 遍历 K Tile，内层 kk 遍历 Tile 内部；四个寄存器累加器贯穿整个 K 维度。",
-      lines: [
-        sourceLine(72, "for (int t = 0; t < K; t += RT_TILE) {", true),
-        sourceLine(88, "    for (int kk = 0; kk < RT_TILE; ++kk) {", true),
-        sourceLine(89, "        float a0 = As[local_row * RM + 0][kk];"),
-        sourceLine(91, "        float b0 = Bs[kk][local_col * RN + 0];"),
-        sourceLine(93, "        acc00 += a0 * b0;", true),
-        sourceLine(97, "    }"),
-        sourceLine(98, "    __syncthreads();"),
-      ],
-    },
-    {
-      location: "gemm.cu:101-104",
-      explanation: "动画中一个线程写回四个相邻输出，正好对应四条带边界检查的 C 写入语句。",
-      lines: [
-        sourceLine(101, "if (base_row + 0 < M && base_col + 0 < N) C[(base_row + 0) * N + base_col + 0] = acc00;", true),
-        sourceLine(102, "if (base_row + 0 < M && base_col + 1 < N) C[(base_row + 0) * N + base_col + 1] = acc01;", true),
-        sourceLine(103, "if (base_row + 1 < M && base_col + 0 < N) C[(base_row + 1) * N + base_col + 0] = acc10;", true),
-        sourceLine(104, "if (base_row + 1 < M && base_col + 1 < N) C[(base_row + 1) * N + base_col + 1] = acc11;", true),
-      ],
-    },
-    {
-      location: "gemm.cu:54-68, 146-148",
-      explanation: "Host 仍启动 16×16 个线程，但 grid 按 RT_TILE×RN 和 RT_TILE×RM 计算，因此一个 Block 覆盖 32×32 输出。",
-      lines: [
-        sourceLine(54, "constexpr int RT_TILE = 16;"),
-        sourceLine(55, "constexpr int RM = 2;"),
-        sourceLine(56, "constexpr int RN = 2;"),
-        sourceLine(67, "int base_row = blockIdx.y * (RT_TILE * RM) + local_row * RM;"),
-        sourceLine(68, "int base_col = blockIdx.x * (RT_TILE * RN) + local_col * RN;"),
-        sourceLine(146, "dim3 block(RT_TILE, RT_TILE);", true),
-        sourceLine(147, "dim3 grid(ceil_div_int(N, RT_TILE * RN), ceil_div_int(M, RT_TILE * RM));", true),
-        sourceLine(148, "gemm_regtile2x2_kernel<<<grid, block>>>(A.data_ptr<float>(), B.data_ptr<float>(), C.data_ptr<float>(), M, N, K);"),
-      ],
-    },
-    {
-      location: "gemm.cu:62-104",
-      explanation: "完整 Register Tiling 数据流：Block 共享 As/Bs，每线程读取 2×2 操作数组合，四个寄存器累加并写回四个输出。",
-      lines: [
-        sourceLine(62, "__shared__ float As[RT_TILE * RM][RT_TILE];", true),
-        sourceLine(63, "__shared__ float Bs[RT_TILE][RT_TILE * RN];", true),
-        sourceLine(70, "float acc00 = 0.0f, acc01 = 0.0f, acc10 = 0.0f, acc11 = 0.0f;", true),
-        sourceLine(89, "float a0 = As[local_row * RM + 0][kk];"),
-        sourceLine(91, "float b0 = Bs[kk][local_col * RN + 0];"),
-        sourceLine(93, "acc00 += a0 * b0;", true),
-        sourceLine(101, "if (base_row + 0 < M && base_col + 0 < N) C[(base_row + 0) * N + base_col + 0] = acc00;"),
-      ],
-    },
-  ],
+function src(location, explanation, lines) {
+  return { location, explanation, lines };
+}
+
+const commonCells = {
+  c00: [{ matrix: "C", row: 0, col: 0, className: "is-c-active" }],
+  c2x2: rangeCells("C", blockCells(0, 1, 0, 1), "is-c-active is-tile"),
+  c4x4: rangeCells("C", blockCells(0, 3, 0, 3), "is-c-active is-tile"),
+  aTile0: rangeCells("A", blockCells(0, 1, 0, 1), "is-a-active is-tile"),
+  bTile0: rangeCells("B", blockCells(0, 1, 0, 1), "is-b-active is-tile"),
+  aTile1: rangeCells("A", blockCells(0, 1, 2, 3), "is-a-active is-tile"),
+  bTile1: rangeCells("B", blockCells(2, 3, 0, 1), "is-b-active is-tile"),
+};
+
+const sourceCatalog = {
+  naiveMap: src("gemm.cu:16-24", "每个线程用 blockIdx/threadIdx 定位一个 C 元素，然后用一个 acc 做完整 K 维点积。", [
+    sourceLine(16, "int row = blockIdx.y * blockDim.y + threadIdx.y;", true),
+    sourceLine(17, "int col = blockIdx.x * blockDim.x + threadIdx.x;", true),
+    sourceLine(18, "if (row >= M || col >= N) return;"),
+    sourceLine(20, "float acc = 0.0f;", true),
+    sourceLine(21, "for (int k = 0; k < K; ++k) {"),
+    sourceLine(24, "C[row * N + col] = acc;"),
+  ]),
+  naiveLoop: src("gemm.cu:21-23", "动画把 for k 循环展开。代码每轮直接从 Global Memory 读取 A[row,k] 和 B[k,col]。", [
+    sourceLine(21, "for (int k = 0; k < K; ++k) {", true),
+    sourceLine(22, "    acc += A[row * K + k] * B[k * N + col];", true),
+    sourceLine(23, "}"),
+  ]),
+  naiveWrite: src("gemm.cu:24, 301-310", "kernel 写回一个 C 元素；host launcher 用 grid 覆盖整个 M×N 输出矩阵。", [
+    sourceLine(24, "C[row * N + col] = acc;", true),
+    sourceLine(306, "auto C = torch::empty({M, N}, A.options());"),
+    sourceLine(307, "dim3 block(16, 16);", true),
+    sourceLine(308, "dim3 grid(ceil_div_int(N, block.x), ceil_div_int(M, block.y));", true),
+    sourceLine(309, "gemm_naive_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(...);"),
+  ]),
+  tiledShared: src("gemm.cu:27-54, 314-323", "TILE=16 决定一个 block 覆盖 16×16 个 C 元素；A/B 子块先进入 shared memory。", [
+    sourceLine(27, "constexpr int TILE = 16;", true),
+    sourceLine(33, "__shared__ float As[TILE][TILE];", true),
+    sourceLine(34, "__shared__ float Bs[TILE][TILE];", true),
+    sourceLine(36, "int row = blockIdx.y * TILE + threadIdx.y;"),
+    sourceLine(37, "int col = blockIdx.x * TILE + threadIdx.x;"),
+    sourceLine(320, "dim3 block(TILE, TILE);", true),
+    sourceLine(321, "dim3 grid(ceil_div_int(N, TILE), ceil_div_int(M, TILE));"),
+  ]),
+  tiledLoad: src("gemm.cu:40-45", "每轮 K tile 中，每个线程加载一个 A 元素和一个 B 元素；越界位置补 0。", [
+    sourceLine(40, "for (int t = 0; t < K; t += TILE) {", true),
+    sourceLine(41, "    int a_col = t + threadIdx.x;"),
+    sourceLine(42, "    int b_row = t + threadIdx.y;"),
+    sourceLine(43, "    As[threadIdx.y][threadIdx.x] = (row < M && a_col < K) ? A[row * K + a_col] : 0.0f;", true),
+    sourceLine(44, "    Bs[threadIdx.y][threadIdx.x] = (b_row < K && col < N) ? B[b_row * N + col] : 0.0f;", true),
+    sourceLine(45, "    __syncthreads();", true),
+  ]),
+  tiledCompute: src("gemm.cu:47-54", "所有线程同步后，从 As/Bs 读取数据完成当前 tile 的累加，最后写回自己的一个 C。", [
+    sourceLine(47, "#pragma unroll"),
+    sourceLine(48, "for (int kk = 0; kk < TILE; ++kk) {", true),
+    sourceLine(49, "    acc += As[threadIdx.y][kk] * Bs[kk][threadIdx.x];", true),
+    sourceLine(51, "__syncthreads();"),
+    sourceLine(54, "if (row < M && col < N) C[row * N + col] = acc;", true),
+  ]),
+  paddedDeclare: src("gemm.cu:57-82", "padding 版本与 tiled 数学一致，只把 shared memory 第二维从 TILE 改为 TILE+1。", [
+    sourceLine(57, "__global__ void gemm_tiled_padding_kernel(...)", true),
+    sourceLine(61, "__shared__ float As[TILE][TILE + 1];", true),
+    sourceLine(62, "__shared__ float Bs[TILE][TILE + 1];", true),
+    sourceLine(64, "int row = blockIdx.y * TILE + threadIdx.y;"),
+    sourceLine(65, "int col = blockIdx.x * TILE + threadIdx.x;"),
+  ]),
+  paddedFlow: src("gemm.cu:68-82, 327-336", "搬运、同步、计算、写回都沿用 tiled 思路；+1 padding 主要用于改变 shared memory 行跨度。", [
+    sourceLine(68, "for (int t = 0; t < K; t += TILE) {", true),
+    sourceLine(71, "As[threadIdx.y][threadIdx.x] = (row < M && a_col < K) ? A[row * K + a_col] : 0.0f;", true),
+    sourceLine(72, "Bs[threadIdx.y][threadIdx.x] = (b_row < K && col < N) ? B[b_row * N + col] : 0.0f;", true),
+    sourceLine(73, "__syncthreads();"),
+    sourceLine(77, "acc += As[threadIdx.y][kk] * Bs[kk][threadIdx.x];", true),
+    sourceLine(82, "if (row < M && col < N) C[row * N + col] = acc;"),
+    sourceLine(335, "gemm_tiled_padding_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(...);"),
+  ]),
+  reg2Map: src("gemm.cu:87-138, 340-349", "RM=RN=2 让一个线程负责 2×2 输出，四个 acc 是线程私有寄存器累加器。", [
+    sourceLine(87, "constexpr int RT_TILE = 16;"),
+    sourceLine(88, "constexpr int RM = 2;", true),
+    sourceLine(89, "constexpr int RN = 2;", true),
+    sourceLine(100, "int base_row = blockIdx.y * (RT_TILE * RM) + local_row * RM;", true),
+    sourceLine(101, "int base_col = blockIdx.x * (RT_TILE * RN) + local_col * RN;", true),
+    sourceLine(103, "float acc00 = 0.0f, acc01 = 0.0f, acc10 = 0.0f, acc11 = 0.0f;", true),
+  ]),
+  reg2Load: src("gemm.cu:105-118", "每个线程加载 2 行 A 和 2 列 B 到 shared memory；整个 block 合起来覆盖更大的 A/B tile。", [
+    sourceLine(105, "for (int t = 0; t < K; t += RT_TILE) {", true),
+    sourceLine(107, "for (int r = 0; r < RM; ++r) {", true),
+    sourceLine(110, "As[local_row * RM + r][local_col] = (row < M && col < K) ? A[row * K + col] : 0.0f;"),
+    sourceLine(113, "for (int c = 0; c < RN; ++c) {", true),
+    sourceLine(116, "Bs[local_row][local_col * RN + c] = (row < K && col < N) ? B[row * N + col] : 0.0f;"),
+    sourceLine(118, "__syncthreads();", true),
+  ]),
+  reg2Compute: src("gemm.cu:120-138", "从 shared memory 取 a0/a1/b0/b1，一次组合更新 4 个输出，最后分别写回。", [
+    sourceLine(121, "for (int kk = 0; kk < RT_TILE; ++kk) {", true),
+    sourceLine(122, "    float a0 = As[local_row * RM + 0][kk];", true),
+    sourceLine(123, "    float a1 = As[local_row * RM + 1][kk];", true),
+    sourceLine(124, "    float b0 = Bs[kk][local_col * RN + 0];", true),
+    sourceLine(125, "    float b1 = Bs[kk][local_col * RN + 1];", true),
+    sourceLine(126, "    acc00 += a0 * b0;", true),
+    sourceLine(127, "    acc01 += a0 * b1;", true),
+    sourceLine(128, "    acc10 += a1 * b0;", true),
+    sourceLine(129, "    acc11 += a1 * b1;", true),
+    sourceLine(134, "if (base_row + 0 < M && base_col + 0 < N) C[...] = acc00;"),
+  ]),
+  reg4Map: src("gemm.cu:140-156, 353-362", "4×4 register tiling 把每线程输出从 4 个扩展到 16 个，block 覆盖 64×64 输出。", [
+    sourceLine(140, "constexpr int RT4_TILE = 16;"),
+    sourceLine(141, "constexpr int RT4_RM = 4;", true),
+    sourceLine(142, "constexpr int RT4_RN = 4;", true),
+    sourceLine(153, "int base_row = blockIdx.y * (RT4_TILE * RT4_RM) + local_row * RT4_RM;", true),
+    sourceLine(154, "int base_col = blockIdx.x * (RT4_TILE * RT4_RN) + local_col * RT4_RN;", true),
+    sourceLine(156, "float acc[RT4_RM][RT4_RN] = {};", true),
+    sourceLine(360, "dim3 grid(ceil_div_int(N, RT4_TILE * RT4_RN), ceil_div_int(M, RT4_TILE * RT4_RM));"),
+  ]),
+  reg4LoadCompute: src("gemm.cu:158-197", "每个线程加载 4 个 A 和 4 个 B，读入 a_vals/b_vals 后用双重循环更新 16 个 acc。", [
+    sourceLine(158, "for (int t = 0; t < K; t += RT4_TILE) {", true),
+    sourceLine(159, "for (int r = 0; r < RT4_RM; ++r) {", true),
+    sourceLine(163, "As[local_row * RT4_RM + r][local_col] = (row < M && col < K) ? A[row * K + col] : 0.0f;"),
+    sourceLine(167, "for (int c = 0; c < RT4_RN; ++c) {", true),
+    sourceLine(170, "Bs[local_row][local_col * RT4_RN + c] = (row < K && col < N) ? B[row * N + col] : 0.0f;"),
+    sourceLine(181, "a_vals[r] = As[local_row * RT4_RM + r][kk];", true),
+    sourceLine(186, "b_vals[c] = Bs[kk][local_col * RT4_RN + c];", true),
+    sourceLine(193, "acc[r][c] += a_vals[r] * b_vals[c];", true),
+  ]),
+  reg4Write: src("gemm.cu:200-208", "写回阶段遍历 4×4 acc，每个元素都带边界判断，支持非整倍数 M/N。", [
+    sourceLine(200, "#pragma unroll"),
+    sourceLine(201, "for (int r = 0; r < RT4_RM; ++r) {", true),
+    sourceLine(203, "    for (int c = 0; c < RT4_RN; ++c) {", true),
+    sourceLine(204, "        int row = base_row + r;"),
+    sourceLine(205, "        int col = base_col + c;"),
+    sourceLine(206, "        if (row < M && col < N) C[row * N + col] = acc[r][c];", true),
+  ]),
+  float4Map: src("gemm.cu:211-244, 366-375", "float4 版本让一个线程负责同一行相邻 4 列，用一次向量读取拿到 B 的 4 个值。", [
+    sourceLine(215, "int row = blockIdx.y * blockDim.y + threadIdx.y;", true),
+    sourceLine(216, "int base_col = (blockIdx.x * blockDim.x + threadIdx.x) * 4;", true),
+    sourceLine(219, "float acc0 = 0.0f;"),
+    sourceLine(220, "float acc1 = 0.0f;"),
+    sourceLine(221, "float acc2 = 0.0f;"),
+    sourceLine(222, "float acc3 = 0.0f;"),
+    sourceLine(373, "dim3 grid(ceil_div_int(N, block.x * 4), ceil_div_int(M, block.y));"),
+  ]),
+  float4Compute: src("gemm.cu:223-244", "当 N 是 4 的倍数且列未越界时，B[k,base_col:base_col+4] 走 float4 向量加载。", [
+    sourceLine(223, "bool can_vectorize_b = (N % 4 == 0) && (base_col + 3 < N);", true),
+    sourceLine(225, "for (int k = 0; k < K; ++k) {", true),
+    sourceLine(226, "    float a = A[row * K + k];", true),
+    sourceLine(228, "    float4 b = reinterpret_cast<const float4*>(B + k * N + base_col)[0];", true),
+    sourceLine(229, "    acc0 += a * b.x;"),
+    sourceLine(230, "    acc1 += a * b.y;"),
+    sourceLine(231, "    acc2 += a * b.z;"),
+    sourceLine(232, "    acc3 += a * b.w;"),
+    sourceLine(241, "if (base_col + 0 < N) C[row * N + base_col + 0] = acc0;"),
+  ]),
+  float4Fallback: src("gemm.cu:233-244", "非 4 对齐或尾部列不足 4 个时，退回逐元素读取和逐元素写回，保证正确性。", [
+    sourceLine(233, "} else {", true),
+    sourceLine(234, "    if (base_col + 0 < N) acc0 += a * B[k * N + base_col + 0];", true),
+    sourceLine(235, "    if (base_col + 1 < N) acc1 += a * B[k * N + base_col + 1];"),
+    sourceLine(236, "    if (base_col + 2 < N) acc2 += a * B[k * N + base_col + 2];"),
+    sourceLine(237, "    if (base_col + 3 < N) acc3 += a * B[k * N + base_col + 3];"),
+    sourceLine(241, "if (base_col + 0 < N) C[row * N + base_col + 0] = acc0;", true),
+    sourceLine(244, "if (base_col + 3 < N) C[row * N + base_col + 3] = acc3;", true),
+  ]),
+  wmmaMap: src("gemm.cu:247-274, 379-405", "WMMA 版本把计算粒度提升到 warp：一个 warp 计算 16×16 C tile，使用 Tensor Core 指令。", [
+    sourceLine(247, "constexpr int WMMA_M = 16;", true),
+    sourceLine(248, "constexpr int WMMA_N = 16;", true),
+    sourceLine(249, "constexpr int WMMA_K = 16;", true),
+    sourceLine(256, "int warp_id = threadIdx.y;", true),
+    sourceLine(257, "int tile_m = blockIdx.y * WMMA_WARPS_PER_BLOCK + warp_id;", true),
+    sourceLine(258, "int tile_n = blockIdx.x;"),
+    sourceLine(398, "dim3 block(32, WMMA_WARPS_PER_BLOCK);"),
+  ]),
+  wmmaFragments: src("gemm.cu:263-274", "fragment 是 WMMA API 的寄存器级 tile 容器；mma_sync 在 Tensor Core 上累加。", [
+    sourceLine(263, "wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> a_frag;", true),
+    sourceLine(264, "wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> b_frag;", true),
+    sourceLine(265, "wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc_frag;", true),
+    sourceLine(266, "wmma::fill_fragment(acc_frag, 0.0f);"),
+    sourceLine(269, "wmma::load_matrix_sync(a_frag, A + row * K + k0, K);", true),
+    sourceLine(270, "wmma::load_matrix_sync(b_frag, B + k0 * N + col, N);", true),
+    sourceLine(271, "wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);", true),
+    sourceLine(274, "wmma::store_matrix_sync(C + row * N + col, acc_frag, N, wmma::mem_row_major);"),
+  ]),
+  wmmaHost: src("gemm.cu:379-405", "host 侧允许 float32/float16 输入；非 16 整倍数 shape 会退回 FP32 tiled 路径保证正确性。", [
+    sourceLine(379, "torch::Tensor gemm_wmma_fp16(torch::Tensor A, torch::Tensor B) {", true),
+    sourceLine(386, "if (M % WMMA_M != 0 || N % WMMA_N != 0 || K % WMMA_K != 0) {", true),
+    sourceLine(387, "    torch::Tensor A_float = A.scalar_type() == torch::kFloat32 ? A : A.to(torch::kFloat32);"),
+    sourceLine(391, "    gemm_tiled_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(...);"),
+    sourceLine(396, "torch::Tensor A_half = A.scalar_type() == torch::kFloat16 ? A : A.to(torch::kFloat16);", true),
+    sourceLine(400, "gemm_wmma_fp16_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(...);", true),
+  ]),
+};
+
+const modeConfig = {
+  naive: {
+    title: "一个线程计算一个输出",
+    summary: "最直接的 FP32 GEMM：每个线程从 Global Memory 直接读取一行 A 和一列 B。",
+    stats: ["1 个 C 元素", "每次乘加都读 Global", "几乎没有", "16 × 16 输出"],
+    concept: 0,
+  },
+  tiled: {
+    title: "Shared Memory Tiling",
+    summary: "线程协作把 A/B tile 搬进 shared memory，再在 block 内复用。",
+    stats: ["1 个 C 元素", "每个 tile 协作读取", "Block 内复用", "16 × 16 输出"],
+    concept: 1,
+  },
+  padded: {
+    title: "Tiled + Shared Padding",
+    summary: "保持 tiled 数学不变，把 shared memory 行跨度改成 TILE+1，给 bank conflict 优化留入口。",
+    stats: ["1 个 C 元素", "同 Tiled", "Block 内复用", "16 × 16 输出"],
+    concept: 2,
+  },
+  regtile2: {
+    title: "Register Tiling 2×2",
+    summary: "一个线程计算 2×2 共 4 个输出，把 a0/a1/b0/b1 在线程内组合复用。",
+    stats: ["4 个 C 元素", "按 tile 协作读取", "Block 内 + 线程内", "32 × 32 输出"],
+    concept: 3,
+  },
+  regtile4: {
+    title: "Register Tiling 4×4",
+    summary: "一个线程计算 4×4 共 16 个输出，提升计算密度，同时显著增加寄存器压力。",
+    stats: ["16 个 C 元素", "每线程搬 4A+4B", "更强线程内复用", "64 × 64 输出"],
+    concept: 4,
+  },
+  float4: {
+    title: "float4 向量化读取",
+    summary: "一个线程负责同一行相邻 4 列，用 float4 一次读取 B 的 4 个连续值。",
+    stats: ["4 个 C 元素", "B 侧 float4 读取", "向量化连续列", "16 × 64 输出"],
+    concept: 5,
+  },
+  wmma: {
+    title: "WMMA FP16 / Tensor Core",
+    summary: "一个 warp 计算 16×16 tile，使用 WMMA fragment 和 Tensor Core 完成 FP16×FP16→FP32 累加。",
+    stats: ["1 warp → 16×16", "FP16 tile load", "Tensor Core", "4 warps / block"],
+    concept: 6,
+  },
 };
 
 const naiveSteps = [
@@ -263,8 +276,9 @@ const naiveSteps = [
     title: "线程 T(0,0) 负责 C[0,0]",
     calculation: "C[0,0] = Σ A[0,k] × B[k,0]",
     detail: "blockIdx 和 threadIdx 共同确定 row、col。一个线程只拥有一个输出位置。",
-    cells: [{ matrix: "C", row: 0, col: 0, className: "is-c-active" }],
+    cells: commonCells.c00,
     registers: ["acc = 0"],
+    source: sourceCatalog.naiveMap,
   },
   ...[0, 1, 2, 3].map((k) => {
     const terms = Array.from({ length: k + 1 }, (_, index) =>
@@ -285,18 +299,19 @@ const naiveSteps = [
       ],
       global: [`A[0,${k}]`, `B[${k},0]`],
       registers: [`acc = ${acc}`],
-      globalArrow: false,
       sharedArrow: true,
+      source: sourceCatalog.naiveLoop,
     };
   }),
   {
     label: "写回结果",
     title: "线程把累加结果写入 C[0,0]",
     calculation: `C[0,0] = ${matrices.C[0][0]}`,
-    detail: "每个线程独立重复这一过程，最终填满整个 C 矩阵。",
+    detail: "每个线程独立重复这一过程，grid 中所有线程合起来填满整个 C 矩阵。",
     cells: [{ matrix: "C", row: 0, col: 0, className: "is-c-active is-written" }],
     registers: [`acc = ${matrices.C[0][0]}`],
     writeCells: [[0, 0]],
+    source: sourceCatalog.naiveWrite,
   },
   {
     label: "Naive 总结",
@@ -304,204 +319,447 @@ const naiveSteps = [
     calculation: "一个线程 → 一个输出；每次乘加 → Global Memory",
     detail: "下一步要解决的问题：同一个 A/B 元素被相邻线程重复读取。",
     cells: [
-      ...rangeCells("A", [[0, 0], [0, 1], [0, 2], [0, 3]], "is-a-active"),
-      ...rangeCells("B", [[0, 0], [1, 0], [2, 0], [3, 0]], "is-b-active"),
+      ...rangeCells("A", blockCells(0, 0, 0, 3), "is-a-active"),
+      ...rangeCells("B", blockCells(0, 3, 0, 0), "is-b-active"),
       { matrix: "C", row: 0, col: 0, className: "is-c-active" },
     ],
     registers: ["1 thread", "1 acc"],
+    source: sourceCatalog.naiveWrite,
   },
 ];
 
 const tiledSteps = [
   {
     label: "矩阵分块",
-    title: "先选择 C 的一个 2×2 教学 Tile",
-    calculation: "Ctile = Atile₀ × Btile₀ + Atile₁ × Btile₁",
-    detail: "真实 kernel 使用 16×16 Tile；动画缩小为 2×2，便于观察。",
-    cells: rangeCells("C", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-c-active is-tile"),
+    title: "一个 block 负责一个 16×16 C tile",
+    calculation: "Ctile += As × Bs",
+    detail: "动画缩小成 2×2 观察；真实代码中 TILE=16，一个 block 有 16×16 个线程。",
+    cells: commonCells.c2x2,
     shared: ["等待加载"],
     registers: ["acc = 0"],
+    source: sourceCatalog.tiledShared,
   },
   {
     label: "协作加载",
-    title: "Block 中的线程把第一个 A/B Tile 搬入 Shared Memory",
+    title: "线程把 A/B 子块搬入 Shared Memory",
     calculation: "Global A/B → Shared As/Bs",
-    detail: "每个线程只搬一小部分。协作完成后，整个 Block 都能访问 As 和 Bs。",
-    cells: [
-      ...rangeCells("A", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-a-active is-tile"),
-      ...rangeCells("B", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-b-active is-tile"),
-    ],
+    detail: "每个线程加载一小块。之后同一份 As/Bs 会被 block 内多个线程读取。",
+    cells: [...commonCells.aTile0, ...commonCells.bTile0],
     global: ["A tile₀", "B tile₀"],
     shared: ["As tile₀", "Bs tile₀"],
     registers: ["acc = 0"],
     globalArrow: true,
+    source: sourceCatalog.tiledLoad,
   },
   {
     label: "同步",
     title: "__syncthreads() 等待 Tile 完整",
     calculation: "所有线程加载完成 → 所有线程开始计算",
-    detail: "同步避免某个线程读取到其他线程尚未写入的 Shared Memory 数据。",
-    cells: [
-      ...rangeCells("A", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-a-active is-tile"),
-      ...rangeCells("B", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-b-active is-tile"),
-    ],
+    detail: "同步避免某个线程读取到其他线程尚未写入的 shared memory 数据。",
+    cells: [...commonCells.aTile0, ...commonCells.bTile0],
     shared: ["As ✓", "Bs ✓"],
     registers: ["等待计算"],
+    source: sourceCatalog.tiledLoad,
   },
   {
     label: "复用计算",
-    title: "同一份 Shared Tile 服务 4 个输出线程",
-    calculation: "C[0:2,0:2] += As[:,0:2] × Bs[0:2,:]",
+    title: "同一份 Shared Tile 服务多个输出线程",
+    calculation: "acc += As[threadIdx.y][kk] × Bs[kk][threadIdx.x]",
     detail: "A 的一个值可服务多个输出列，B 的一个值可服务多个输出行。",
-    cells: [
-      ...rangeCells("A", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-a-active is-tile"),
-      ...rangeCells("B", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-b-active is-tile"),
-      ...rangeCells("C", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-c-active is-tile"),
-    ],
+    cells: [...commonCells.aTile0, ...commonCells.bTile0, ...commonCells.c2x2],
     shared: ["As reused", "Bs reused"],
     registers: ["acc00", "acc01", "acc10", "acc11"],
     sharedArrow: true,
+    source: sourceCatalog.tiledCompute,
   },
   {
     label: "下一个 K Tile",
     title: "覆盖 Shared Memory，继续累加剩余 K 范围",
-    calculation: "t = 2：加载 k=2..3，再累加到原有 acc",
-    detail: "分块只改变计算顺序，不改变完整点积的数学结果。",
-    cells: [
-      ...rangeCells("A", [[0, 2], [0, 3], [1, 2], [1, 3]], "is-a-active is-tile"),
-      ...rangeCells("B", [[2, 0], [2, 1], [3, 0], [3, 1]], "is-b-active is-tile"),
-      ...rangeCells("C", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-c-active is-tile"),
-    ],
+    calculation: "t += TILE：加载下一块 K，再累加到原有 acc",
+    detail: "分块只改变数据流动和复用方式，不改变完整点积的数学结果。",
+    cells: [...commonCells.aTile1, ...commonCells.bTile1, ...commonCells.c2x2],
     global: ["A tile₁", "B tile₁"],
     shared: ["As tile₁", "Bs tile₁"],
     registers: ["继续累加"],
     globalArrow: true,
+    source: sourceCatalog.tiledCompute,
   },
   {
     label: "写回结果",
     title: "每个线程写回自己负责的一个输出",
     calculation: "4 threads → C[0,0], C[0,1], C[1,0], C[1,1]",
-    detail: "与 Naive 相比，线程分工没变，变化在于数据先进入 Shared Memory。",
-    cells: rangeCells("C", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-c-active is-written"),
-    writeCells: [[0, 0], [0, 1], [1, 0], [1, 1]],
+    detail: "与 Naive 相比，线程分工没变；变化在于 Global → Shared → Register 的读取路径。",
+    cells: rangeCells("C", blockCells(0, 1, 0, 1), "is-c-active is-written"),
+    writeCells: blockCells(0, 1, 0, 1),
     shared: ["复用完成"],
     registers: ["4 threads", "4 acc"],
+    source: sourceCatalog.tiledCompute,
   },
   {
     label: "Tiled 总结",
     title: "减少 Global Memory 重复读取",
     calculation: "Global 读取一次 → Shared Memory 复用多次",
-    detail: "下一步要解决的问题：每个线程仍然只计算一个输出，线程内复用还不充分。",
-    cells: [
-      ...rangeCells("A", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-a-active is-tile"),
-      ...rangeCells("B", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-b-active is-tile"),
-      ...rangeCells("C", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-c-active is-tile"),
-    ],
+    detail: "下一步可以优化 shared memory 访问模式，或让一个线程计算更多输出。",
+    cells: [...commonCells.aTile0, ...commonCells.bTile0, ...commonCells.c2x2],
     shared: ["Block 共享"],
     registers: ["1 output / thread"],
+    source: sourceCatalog.tiledShared,
   },
 ];
 
-const regtileSteps = [
+const paddedSteps = [
+  {
+    label: "Shared Padding",
+    title: "As/Bs 的第二维增加 1 个 padding",
+    calculation: "As[TILE][TILE + 1]，Bs[TILE][TILE + 1]",
+    detail: "这个版本数学和 tiled 完全一样，重点是改变 shared memory 中每一行的跨度。",
+    cells: [...commonCells.aTile0, ...commonCells.bTile0],
+    shared: ["As 16×17", "Bs 16×17"],
+    registers: ["acc = 0"],
+    source: sourceCatalog.paddedDeclare,
+  },
+  {
+    label: "协作加载",
+    title: "加载逻辑保持不变",
+    calculation: "Global A/B → padded As/Bs",
+    detail: "线程仍然写入 As[ty][tx] 和 Bs[ty][tx]；多出来的一列不保存数学数据，只改变行跨度。",
+    cells: [...commonCells.aTile0, ...commonCells.bTile0],
+    global: ["A tile", "B tile"],
+    shared: ["As + pad", "Bs + pad"],
+    registers: ["acc = 0"],
+    globalArrow: true,
+    source: sourceCatalog.paddedFlow,
+  },
+  {
+    label: "复用计算",
+    title: "计算公式与 Tiled 相同",
+    calculation: "acc += As[ty][kk] × Bs[kk][tx]",
+    detail: "padding 不改变读写的数学坐标，只改变 shared memory 物理布局，可用于观察 bank conflict 变化。",
+    cells: [...commonCells.aTile0, ...commonCells.bTile0, ...commonCells.c2x2],
+    shared: ["As padded", "Bs padded"],
+    registers: ["acc"],
+    sharedArrow: true,
+    source: sourceCatalog.paddedFlow,
+  },
+  {
+    label: "写回",
+    title: "输出仍是一线程一个 C 元素",
+    calculation: "if (row < M && col < N) C[row*N+col] = acc",
+    detail: "所以这个版本适合和 gemm_tiled 对比，看 padding 对 shared memory 访问效率的影响。",
+    cells: rangeCells("C", blockCells(0, 1, 0, 1), "is-c-active is-written"),
+    writeCells: blockCells(0, 1, 0, 1),
+    shared: ["复用完成"],
+    registers: ["acc"],
+    source: sourceCatalog.paddedFlow,
+  },
+  {
+    label: "Padding 总结",
+    title: "这是 shared memory 物理布局优化",
+    calculation: "数学不变；内存行跨度改变",
+    detail: "当某些访问模式触发 shared memory bank conflict 时，padding 常用于打散冲突。",
+    cells: [...commonCells.aTile0, ...commonCells.bTile0, ...commonCells.c2x2],
+    shared: ["TILE+1 stride"],
+    registers: ["1 output / thread"],
+    source: sourceCatalog.paddedDeclare,
+  },
+];
+
+const regtile2Steps = [
   {
     label: "扩大线程职责",
-    title: "一个线程负责 C 中相邻的 2×2 区域",
+    title: "一个线程负责相邻 2×2 输出",
     calculation: "1 thread → acc00, acc01, acc10, acc11",
     detail: "动画中的紫色 2×2 区域由一个线程完成，而不是四个线程。",
-    cells: rangeCells("C", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-c-active is-tile"),
+    cells: commonCells.c2x2,
     shared: ["As", "Bs"],
     registers: ["acc00=0", "acc01=0", "acc10=0", "acc11=0"],
+    source: sourceCatalog.reg2Map,
+  },
+  {
+    label: "协作加载",
+    title: "每线程加载 2 行 A 和 2 列 B",
+    calculation: "As[local_row*2+r][local_col]，Bs[local_row][local_col*2+c]",
+    detail: "整个 block 合作填满更大的 As/Bs tile，因此一个 block 覆盖 32×32 输出。",
+    cells: [...rangeCells("A", [[0, 0], [1, 0]], "is-a-active"), ...rangeCells("B", [[0, 0], [0, 1]], "is-b-active")],
+    global: ["2×A", "2×B"],
+    shared: ["As 32×16", "Bs 16×32"],
+    registers: ["4 acc"],
+    globalArrow: true,
+    source: sourceCatalog.reg2Load,
   },
   {
     label: "读取操作数",
-    title: "从 Shared Memory 读取 2 个 A 和 2 个 B",
-    calculation: "a0, a1 ← As；b0, b1 ← Bs",
-    detail: "这些值进入当前线程，准备在寄存器中组合复用。",
-    cells: [
-      ...rangeCells("A", [[0, 0], [1, 0]], "is-a-active"),
-      ...rangeCells("B", [[0, 0], [0, 1]], "is-b-active"),
-      ...rangeCells("C", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-c-active is-tile"),
-    ],
+    title: "a0/a1/b0/b1 进入当前线程寄存器",
+    calculation: "a0,a1 ← As；b0,b1 ← Bs",
+    detail: "这些值会在线程内部被组合复用。",
+    cells: [...rangeCells("A", [[0, 0], [1, 0]], "is-a-active"), ...rangeCells("B", [[0, 0], [0, 1]], "is-b-active"), ...commonCells.c2x2],
     shared: ["a0", "a1", "b0", "b1"],
-    registers: ["4 accumulators"],
-    sharedArrow: true,
-  },
-  {
-    label: "四种组合",
-    title: "2 个 A × 2 个 B 形成 4 次乘加",
-    calculation: "a0b0 → acc00；a0b1 → acc01；a1b0 → acc10；a1b1 → acc11",
-    detail: "一次 Shared Memory 读取被当前线程用于四个输出，形成线程内数据复用。",
-    cells: [
-      ...rangeCells("A", [[0, 0], [1, 0]], "is-a-active"),
-      ...rangeCells("B", [[0, 0], [0, 1]], "is-b-active"),
-      ...rangeCells("C", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-c-active is-tile"),
-    ],
-    shared: ["a0", "a1", "b0", "b1"],
-    registers: ["acc00 += a0b0", "acc01 += a0b1", "acc10 += a1b0", "acc11 += a1b1"],
-    sharedArrow: true,
-  },
-  {
-    label: "沿 K 累加",
-    title: "对 Tile 中每个 kk 重复四路乘加",
-    calculation: "for kk in 0..15：更新 4 个 acc",
-    detail: "真实 kernel 的 RT_TILE=16；四个累加器始终保留在同一线程中。",
-    cells: [
-      ...rangeCells("A", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-a-active is-tile"),
-      ...rangeCells("B", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-b-active is-tile"),
-      ...rangeCells("C", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-c-active is-tile"),
-    ],
-    shared: ["As tile", "Bs tile"],
     registers: ["acc00", "acc01", "acc10", "acc11"],
     sharedArrow: true,
+    source: sourceCatalog.reg2Compute,
   },
   {
-    label: "写回四个结果",
-    title: "同一个线程连续写回相邻 2×2 输出",
-    calculation: `C tile = [[${matrices.C[0][0]}, ${matrices.C[0][1]}], [${matrices.C[1][0]}, ${matrices.C[1][1]}]]`,
-    detail: "边界判断确保 M/N 不是 Tile 整倍数时不会越界写入。",
-    cells: rangeCells("C", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-c-active is-written"),
-    writeCells: [[0, 0], [0, 1], [1, 0], [1, 1]],
+    label: "四路乘加",
+    title: "2 个 A × 2 个 B 形成 4 次 FMA",
+    calculation: "a0b0→acc00；a0b1→acc01；a1b0→acc10；a1b1→acc11",
+    detail: "一次 shared memory 读取被当前线程用于四个输出，形成线程内复用。",
+    cells: [...rangeCells("A", [[0, 0], [1, 0]], "is-a-active"), ...rangeCells("B", [[0, 0], [0, 1]], "is-b-active"), ...commonCells.c2x2],
+    shared: ["a0", "a1", "b0", "b1"],
+    registers: ["4 FMA"],
+    sharedArrow: true,
+    source: sourceCatalog.reg2Compute,
+  },
+  {
+    label: "写回 2×2",
+    title: "同一个线程连续写回四个相邻输出",
+    calculation: `[[${matrices.C[0][0]}, ${matrices.C[0][1]}], [${matrices.C[1][0]}, ${matrices.C[1][1]}]]`,
+    detail: "每个写回位置都有边界判断，支持 M/N 不是 tile 整倍数。",
+    cells: rangeCells("C", blockCells(0, 1, 0, 1), "is-c-active is-written"),
+    writeCells: blockCells(0, 1, 0, 1),
     shared: ["完成"],
-    registers: [
-      `acc00=${matrices.C[0][0]}`,
-      `acc01=${matrices.C[0][1]}`,
-      `acc10=${matrices.C[1][0]}`,
-      `acc11=${matrices.C[1][1]}`,
-    ],
-  },
-  {
-    label: "Block 覆盖扩大",
-    title: "相同 16×16 线程 Block 计算 32×32 输出",
-    calculation: "256 threads × 4 outputs = 1024 outputs",
-    detail: "更多计算分摊了循环、同步和地址计算开销，但也会消耗更多寄存器。",
-    cells: rangeCells("C", [
-      [0, 0], [0, 1], [0, 2], [0, 3],
-      [1, 0], [1, 1], [1, 2], [1, 3],
-      [2, 0], [2, 1], [2, 2], [2, 3],
-      [3, 0], [3, 1], [3, 2], [3, 3],
-    ], "is-c-active is-tile"),
-    shared: ["Block 共享"],
-    registers: ["4 outputs / thread"],
-  },
-  {
-    label: "Regtile 总结",
-    title: "让一次读取完成更多计算",
-    calculation: "Block 内复用 + 线程内复用",
-    detail: "优化层次完整串联：并行分工 → Shared Memory → Register Tiling。",
-    cells: [
-      ...rangeCells("A", [[0, 0], [1, 0]], "is-a-active"),
-      ...rangeCells("B", [[0, 0], [0, 1]], "is-b-active"),
-      ...rangeCells("C", [[0, 0], [0, 1], [1, 0], [1, 1]], "is-c-active is-tile"),
-    ],
-    shared: ["As", "Bs"],
     registers: ["acc00", "acc01", "acc10", "acc11"],
+    source: sourceCatalog.reg2Compute,
+  },
+  {
+    label: "Regtile2 总结",
+    title: "Block 内复用 + 线程内复用",
+    calculation: "256 threads × 4 outputs = 1024 outputs",
+    detail: "比 tiled 多用了寄存器，但每个线程完成更多乘加，减少地址计算和调度开销。",
+    cells: commonCells.c4x4,
+    shared: ["As/Bs"],
+    registers: ["4 outputs / thread"],
+    source: sourceCatalog.reg2Map,
+  },
+];
+
+const regtile4Steps = [
+  {
+    label: "4×4 线程职责",
+    title: "一个线程负责 4×4 共 16 个输出",
+    calculation: "float acc[4][4] = {}",
+    detail: "这是 regtile2x2 的自然扩展：更多线程内复用，也带来更高寄存器压力。",
+    cells: commonCells.c4x4,
+    shared: ["As 64×16", "Bs 16×64"],
+    registers: ["acc[4][4]"],
+    source: sourceCatalog.reg4Map,
+  },
+  {
+    label: "加载 4A + 4B",
+    title: "每个线程装入 4 行 A 和 4 列 B",
+    calculation: "for r in 0..3 load A；for c in 0..3 load B",
+    detail: "整个 block 的 shared tile 扩大，一个 block 覆盖 64×64 输出。",
+    cells: [
+      ...rangeCells("A", [[0, 0], [1, 0], [2, 0], [3, 0]], "is-a-active"),
+      ...rangeCells("B", [[0, 0], [0, 1], [0, 2], [0, 3]], "is-b-active"),
+    ],
+    global: ["4×A", "4×B"],
+    shared: ["As 64×16", "Bs 16×64"],
+    registers: ["acc[4][4]"],
+    globalArrow: true,
+    source: sourceCatalog.reg4LoadCompute,
+  },
+  {
+    label: "读取 a_vals/b_vals",
+    title: "4 个 A 和 4 个 B 进入线程寄存器",
+    calculation: "a_vals[4] × b_vals[4]",
+    detail: "当前 kk 下，4 个 A 与 4 个 B 会组合成 16 次乘加。",
+    cells: [
+      ...rangeCells("A", [[0, 0], [1, 0], [2, 0], [3, 0]], "is-a-active"),
+      ...rangeCells("B", [[0, 0], [0, 1], [0, 2], [0, 3]], "is-b-active"),
+      ...commonCells.c4x4,
+    ],
+    shared: ["a_vals[4]", "b_vals[4]"],
+    registers: ["acc[4][4]"],
+    sharedArrow: true,
+    source: sourceCatalog.reg4LoadCompute,
+  },
+  {
+    label: "16 路乘加",
+    title: "双重循环更新 16 个 acc",
+    calculation: "for r,c：acc[r][c] += a_vals[r] × b_vals[c]",
+    detail: "这是更强的线程内复用：同一个 a_vals[r] 会被 4 个输出列复用。",
+    cells: commonCells.c4x4,
+    shared: ["a_vals", "b_vals"],
+    registers: ["16 acc"],
+    sharedArrow: true,
+    source: sourceCatalog.reg4LoadCompute,
+  },
+  {
+    label: "写回 4×4",
+    title: "边界检查后写回 16 个输出",
+    calculation: "if (row < M && col < N) C[row*N+col] = acc[r][c]",
+    detail: "4×4 register tile 对非整倍数矩阵也能正确处理尾部输出。",
+    cells: rangeCells("C", blockCells(0, 3, 0, 3), "is-c-active is-written"),
+    writeCells: blockCells(0, 3, 0, 3),
+    shared: ["完成"],
+    registers: ["acc[4][4]"],
+    source: sourceCatalog.reg4Write,
+  },
+  {
+    label: "Regtile4 总结",
+    title: "计算密度更高，但寄存器压力更大",
+    calculation: "256 threads × 16 outputs = 4096 outputs",
+    detail: "这个版本适合观察寄存器使用量、occupancy 和算术强度之间的权衡。",
+    cells: commonCells.c4x4,
+    shared: ["Block 共享"],
+    registers: ["16 outputs / thread"],
+    source: sourceCatalog.reg4Map,
+  },
+];
+
+const float4Steps = [
+  {
+    label: "相邻 4 列",
+    title: "一个线程负责同一行的 4 个 C 输出",
+    calculation: "base_col = thread_x × 4",
+    detail: "线程职责沿列方向扩展，方便一次读取 B 的 4 个连续 float。",
+    cells: rangeCells("C", blockCells(0, 0, 0, 3), "is-c-active is-tile"),
+    global: ["A row", "B vec4"],
+    shared: ["未使用"],
+    registers: ["acc0", "acc1", "acc2", "acc3"],
+    source: sourceCatalog.float4Map,
+  },
+  {
+    label: "float4 读取",
+    title: "B 的连续 4 列被一次向量加载",
+    calculation: "float4 b = B[k, base_col:base_col+4]",
+    detail: "A 仍是标量读取；B 的四个连续列进入 b.x/b.y/b.z/b.w。",
+    cells: [
+      { matrix: "A", row: 0, col: 0, className: "is-a-active" },
+      ...rangeCells("B", blockCells(0, 0, 0, 3), "is-b-active"),
+      ...rangeCells("C", blockCells(0, 0, 0, 3), "is-c-active is-tile"),
+    ],
+    global: ["A[0,k]", "float4 B"],
+    shared: ["未使用"],
+    registers: ["b.x", "b.y", "b.z", "b.w"],
+    sharedArrow: true,
+    source: sourceCatalog.float4Compute,
+  },
+  {
+    label: "四路累加",
+    title: "同一个 A 标量更新 4 个 acc",
+    calculation: "acc0..acc3 += a × b.x..b.w",
+    detail: "这个版本强调连续访存和向量化读取，不使用 shared memory tiling。",
+    cells: [
+      { matrix: "A", row: 0, col: 0, className: "is-a-active" },
+      ...rangeCells("B", blockCells(0, 0, 0, 3), "is-b-active"),
+      ...rangeCells("C", blockCells(0, 0, 0, 3), "is-c-active is-tile"),
+    ],
+    global: ["A scalar", "B float4"],
+    shared: ["未使用"],
+    registers: ["acc0", "acc1", "acc2", "acc3"],
+    sharedArrow: true,
+    source: sourceCatalog.float4Compute,
+  },
+  {
+    label: "尾部保护",
+    title: "N 不是 4 的倍数时退回标量路径",
+    calculation: "if (base_col+i < N) acci += ...",
+    detail: "float4 读取只在安全对齐范围内使用；尾部列逐元素处理保证正确性。",
+    cells: [
+      ...rangeCells("B", [[0, 1], [0, 2], [0, 3]], "is-b-active"),
+      ...rangeCells("C", [[0, 1], [0, 2], [0, 3]], "is-c-active is-tile"),
+    ],
+    global: ["scalar fallback"],
+    shared: ["未使用"],
+    registers: ["acc0..3"],
+    source: sourceCatalog.float4Fallback,
+  },
+  {
+    label: "写回 4 列",
+    title: "一个线程写回 C[row, base_col:base_col+4]",
+    calculation: `C[0,0:4] = [${matrices.C[0].join(", ")}]`,
+    detail: "每个输出列都有边界判断；一个 block 在列方向覆盖 16×4=64 个输出。",
+    cells: rangeCells("C", blockCells(0, 0, 0, 3), "is-c-active is-written"),
+    writeCells: blockCells(0, 0, 0, 3),
+    global: ["C vec4"],
+    shared: ["未使用"],
+    registers: ["acc0", "acc1", "acc2", "acc3"],
+    source: sourceCatalog.float4Fallback,
+  },
+];
+
+const wmmaSteps = [
+  {
+    label: "Warp Tile",
+    title: "一个 warp 计算一个 16×16 C tile",
+    calculation: "32 lanes → WMMA 16×16×16",
+    detail: "这里的计算粒度不再是单个线程，而是一个 warp 协同执行 Tensor Core 指令。",
+    cells: commonCells.c4x4,
+    global: ["A half tile", "B half tile"],
+    shared: ["fragment"],
+    registers: ["acc_frag"],
+    source: sourceCatalog.wmmaMap,
+  },
+  {
+    label: "Fragment",
+    title: "A/B/Accumulator fragment 进入寄存器级 tile 容器",
+    calculation: "a_frag, b_frag, acc_frag",
+    detail: "fragment 是 WMMA API 的抽象。每个 lane 持有 fragment 的一部分数据。",
+    cells: [...commonCells.aTile0, ...commonCells.bTile0, ...commonCells.c4x4],
+    global: ["A half", "B half"],
+    shared: ["WMMA fragment"],
+    registers: ["acc_frag = 0"],
+    sharedArrow: true,
+    source: sourceCatalog.wmmaFragments,
+  },
+  {
+    label: "加载矩阵片段",
+    title: "load_matrix_sync 读取 A/B 的 16×16 half tile",
+    calculation: "load_matrix_sync(a_frag), load_matrix_sync(b_frag)",
+    detail: "当前代码使用 row_major 布局；shape 必须是 16 的倍数，否则 host 侧退回 tiled。",
+    cells: [...commonCells.aTile0, ...commonCells.bTile0],
+    global: ["A half tile", "B half tile"],
+    shared: ["fragment load"],
+    registers: ["a_frag", "b_frag"],
+    sharedArrow: true,
+    source: sourceCatalog.wmmaFragments,
+  },
+  {
+    label: "Tensor Core",
+    title: "mma_sync 完成 FP16×FP16→FP32 累加",
+    calculation: "acc_frag = a_frag × b_frag + acc_frag",
+    detail: "这一步由 Tensor Core 执行，是 WMMA 版本区别于 FP32 CUDA core kernel 的核心。",
+    cells: commonCells.c4x4,
+    global: ["Tensor Core"],
+    shared: ["mma_sync"],
+    registers: ["FP32 acc_frag"],
+    sharedArrow: true,
+    source: sourceCatalog.wmmaFragments,
+  },
+  {
+    label: "写回 Fragment",
+    title: "store_matrix_sync 写回 16×16 输出 tile",
+    calculation: "store_matrix_sync(C + row*N + col, acc_frag, N)",
+    detail: "输出 C 是 float32；输入可以是 float16，也可以由 host 侧从 float32 临时转 half。",
+    cells: rangeCells("C", blockCells(0, 3, 0, 3), "is-c-active is-written"),
+    writeCells: blockCells(0, 3, 0, 3),
+    global: ["C FP32"],
+    shared: ["fragment done"],
+    registers: ["acc_frag"],
+    source: sourceCatalog.wmmaFragments,
+  },
+  {
+    label: "Host 选择",
+    title: "非 16 整倍数 shape 自动退回 FP32 tiled",
+    calculation: "if M/N/K not multiple of 16 → gemm_tiled_kernel",
+    detail: "这样测试中的非整倍数 shape 也能通过；真正 WMMA 路径用于 16 对齐的矩阵。",
+    cells: commonCells.c4x4,
+    global: ["half path", "fallback path"],
+    shared: ["WMMA / Tiled"],
+    registers: ["acc_frag / acc"],
+    source: sourceCatalog.wmmaHost,
   },
 ];
 
 const stepsByMode = {
   naive: naiveSteps,
   tiled: tiledSteps,
-  regtile: regtileSteps,
+  padded: paddedSteps,
+  regtile2: regtile2Steps,
+  regtile4: regtile4Steps,
+  float4: float4Steps,
+  wmma: wmmaSteps,
 };
 
 const state = {
@@ -636,7 +894,6 @@ function render() {
   const config = modeConfig[state.mode];
   const steps = stepsByMode[state.mode];
   const step = steps[state.step];
-  const source = sourceByMode[state.mode][state.step];
 
   elements.modeTitle.textContent = config.title;
   elements.modeSummary.textContent = config.summary;
@@ -667,7 +924,7 @@ function render() {
   elements.globalArrow.classList.toggle("is-active", Boolean(step.globalArrow));
   elements.sharedArrow.classList.toggle("is-active", Boolean(step.sharedArrow));
   updateConcepts(config.concept);
-  renderSource(source);
+  renderSource(step.source);
 }
 
 function stopPlayback() {
@@ -714,6 +971,14 @@ function setMode(mode) {
   state.mode = mode;
   state.step = 0;
   render();
+  const activeTab = document.querySelector(`.mode-tab[data-mode="${mode}"]`);
+  if (activeTab) {
+    const tabs = activeTab.closest(".mode-tabs");
+    if (tabs) {
+      const left = activeTab.offsetLeft - (tabs.clientWidth - activeTab.offsetWidth) / 2;
+      tabs.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
+    }
+  }
 }
 
 document.querySelectorAll(".mode-tab").forEach((tab) => {

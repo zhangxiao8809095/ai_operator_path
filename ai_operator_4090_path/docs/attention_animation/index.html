@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>attention.cu 动画讲解：从入口函数到 naive attention kernel</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">AI Operator 4090 Path</p>
+        <h1>attention.cu 动画拆解</h1>
+      </div>
+      <div class="model-path" aria-label="attention.cu 调用路径">
+        <span>Python</span>
+        <b>→</b>
+        <span>Host launcher</span>
+        <b>→</b>
+        <span>CUDA Grid</span>
+        <b>→</b>
+        <span>Block</span>
+        <b>→</b>
+        <span>Softmax</span>
+        <b>→</b>
+        <span>O</span>
+      </div>
+    </header>
+
+    <nav class="chapter-tabs" aria-label="attention.cu 动画章节">
+      <button class="chapter-tab is-active" data-chapter="host" type="button">
+        <span>01</span>
+        <strong>入口函数</strong>
+        <small>attention_naive</small>
+      </button>
+      <button class="chapter-tab" data-chapter="kernel" type="button">
+        <span>02</span>
+        <strong>一个 Block</strong>
+        <small>attention_naive_kernel</small>
+      </button>
+      <button class="chapter-tab" data-chapter="reduce" type="button">
+        <span>03</span>
+        <strong>Softmax 与瓶颈</strong>
+        <small>reduction / naive cost</small>
+      </button>
+    </nav>
+
+    <section class="lesson-strip">
+      <div>
+        <span class="section-label">本章问题</span>
+        <strong id="chapter-question">Python 调用进来后，C++ 入口函数先做什么？</strong>
+      </div>
+      <p id="chapter-summary">`attention_naive` 先检查 Q/K/V，再分配输出 O，最后配置 grid 和 block 启动 kernel。</p>
+      <div class="progress-track" aria-label="动画进度">
+        <span id="progress-bar"></span>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <div class="visual-stage">
+        <div class="stage-heading">
+          <div>
+            <span class="section-label" id="phase-label">Python API</span>
+            <h2 id="phase-title">ops.attention_naive(q, k, v, causal)</h2>
+          </div>
+          <span class="step-count" id="step-count">01 / 06</span>
+        </div>
+
+        <section class="chapter-view is-active" id="host-view" aria-label="attention_naive 入口函数动画">
+          <div class="host-flow">
+            <article class="python-panel" id="python-panel">
+              <header>
+                <span>Python</span>
+                <strong>ops.attention_naive</strong>
+              </header>
+              <code>_C.attention_naive(q, k, v, bool(causal))</code>
+            </article>
+
+            <div class="flow-arrow" id="host-arrow" aria-hidden="true"><span></span></div>
+
+            <article class="launcher-panel">
+              <header class="panel-heading">
+                <div>
+                  <span>C++ Host launcher</span>
+                  <strong>attention_naive(Q, K, V, causal)</strong>
+                </div>
+                <small>lines 93-109</small>
+              </header>
+              <div class="launcher-stack">
+                <button class="launcher-step" data-host-part="check" type="button">CHECK_INPUT(Q/K/V)</button>
+                <button class="launcher-step" data-host-part="shape" type="button">Q/K/V must be [B,H,S,D]</button>
+                <button class="launcher-step" data-host-part="output" type="button">O = torch::empty_like(Q)</button>
+                <button class="launcher-step" data-host-part="launch" type="button">kernel&lt;&lt;&lt;grid, block, smem&gt;&gt;&gt;</button>
+              </div>
+            </article>
+          </div>
+
+          <div class="shape-launch-grid">
+            <article class="tensor-panel">
+              <header class="panel-heading">
+                <div>
+                  <span>Q / K / V</span>
+                  <strong>同样的四维连续张量</strong>
+                </div>
+                <small>fp32 CUDA</small>
+              </header>
+              <div class="tensor-stack" id="tensor-stack"></div>
+            </article>
+
+            <article class="grid-panel">
+              <header class="panel-heading">
+                <div>
+                  <span>Kernel launch</span>
+                  <strong>grid(D, S, B × H)</strong>
+                </div>
+                <small>block = 128</small>
+              </header>
+              <div class="grid-cube">
+                <div class="axis axis-d" id="axis-d"><span>D</span><b>d_out</b></div>
+                <div class="axis axis-s" id="axis-s"><span>S</span><b>query i</b></div>
+                <div class="axis axis-bh" id="axis-bh"><span>B × H</span><b>batch/head</b></div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="chapter-view" id="kernel-view" aria-label="attention_naive_kernel 单个 block 动画">
+          <div class="kernel-layout">
+            <article class="output-panel">
+              <header class="panel-heading">
+                <div>
+                  <span>当前 Block 负责</span>
+                  <strong>一个输出标量</strong>
+                </div>
+                <small id="block-index-label">blockIdx = (3, 3, 1)</small>
+              </header>
+              <div class="output-map" id="output-map" aria-label="O 的 S x D 输出区域"></div>
+              <div class="block-formula">
+                <code id="block-formula-code">d_out = blockIdx.x；i = blockIdx.y；bh = blockIdx.z</code>
+              </div>
+            </article>
+
+            <article class="attention-panel">
+              <header class="panel-heading">
+                <div>
+                  <span>QK 打分</span>
+                  <strong>当前 query 扫过所有 key</strong>
+                </div>
+                <small id="scan-status">等待线程分工</small>
+              </header>
+
+              <div class="attention-matrix">
+                <div class="query-row">
+                  <span>Q[i]</span>
+                  <div id="query-cells"></div>
+                </div>
+                <div class="score-area">
+                  <div class="key-stack" id="key-stack"></div>
+                  <div class="dot-core" id="dot-core">
+                    <span>dot</span>
+                    <strong>Q[i] · K[j]</strong>
+                    <code>/ sqrt(D)</code>
+                  </div>
+                  <div class="value-stack" id="value-stack"></div>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <div class="thread-rail">
+            <span class="section-label">Block 内线程</span>
+            <div class="thread-strip" id="thread-strip"></div>
+          </div>
+        </section>
+
+        <section class="chapter-view" id="reduce-view" aria-label="softmax reduction 与 naive attention 瓶颈动画">
+          <div class="reduce-layout">
+            <article class="reduction-panel">
+              <header class="panel-heading">
+                <div>
+                  <span>Shared memory reduction</span>
+                  <strong id="reduction-title">先找每个 score 的最大值</strong>
+                </div>
+                <small>extern __shared__ float smem[]</small>
+              </header>
+
+              <div class="lane-lab" id="lane-lab"></div>
+              <div class="shared-memory">
+                <div class="shared-row">
+                  <span>smax</span>
+                  <div id="smax-row"></div>
+                </div>
+                <div class="shared-row">
+                  <span>ssum</span>
+                  <div id="ssum-row"></div>
+                </div>
+                <div class="shared-row">
+                  <span>sacc</span>
+                  <div id="sacc-row"></div>
+                </div>
+              </div>
+            </article>
+
+            <article class="formula-panel">
+              <span class="section-label">当前公式</span>
+              <code id="formula-code">local_max = max(score)</code>
+              <p id="formula-detail">每个线程只看一部分 j，然后把局部最大值写进 shared memory。</p>
+              <div class="writeback-box" id="writeback-box">
+                <span>O[b,h,i,d_out]</span>
+                <strong>sacc[0] / denom</strong>
+              </div>
+            </article>
+          </div>
+
+          <div class="bottleneck-panel">
+            <header>
+              <span class="section-label">为什么 naive</span>
+              <strong>清楚，但慢</strong>
+            </header>
+            <div class="bottleneck-grid">
+              <div class="meter" data-meter="repeat">
+                <span>重复 QK</span>
+                <b></b>
+                <small>每个 d_out 都重算 score</small>
+              </div>
+              <div class="meter" data-meter="twopass">
+                <span>两遍扫描</span>
+                <b></b>
+                <small>先 max，再 sum/acc</small>
+              </div>
+              <div class="meter" data-meter="memory">
+                <span>访存复用少</span>
+                <b></b>
+                <small>没有 tile 和 online softmax</small>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div class="explanation-panel">
+          <span class="section-label">当前结论</span>
+          <code id="concept-code">torch::Tensor attention_naive(...)</code>
+          <p id="phase-detail">这个函数是入口，不直接算 attention，而是负责检查、分配和 launch。</p>
+        </div>
+      </div>
+
+      <aside class="inspector">
+        <section class="control-panel">
+          <div class="control-row">
+            <button class="icon-button" id="reset-button" type="button" title="重置" aria-label="重置">↺</button>
+            <button class="icon-button" id="prev-button" type="button" title="上一步" aria-label="上一步">‹</button>
+            <button class="play-button" id="play-button" type="button" title="播放" aria-label="播放">
+              <span id="play-icon">▶</span>
+            </button>
+            <button class="icon-button" id="next-button" type="button" title="下一步" aria-label="下一步">›</button>
+          </div>
+          <label class="speed-control">
+            <span>速度</span>
+            <input id="speed-input" type="range" min="450" max="1800" value="1050" step="50">
+            <output id="speed-output">1.0×</output>
+          </label>
+        </section>
+
+        <section class="facts-panel">
+          <h2 id="facts-title">入口职责</h2>
+          <dl>
+            <div>
+              <dt id="fact-label-0">输入</dt>
+              <dd id="fact-value-0">Q/K/V</dd>
+            </div>
+            <div>
+              <dt id="fact-label-1">形状</dt>
+              <dd id="fact-value-1">[B,H,S,D]</dd>
+            </div>
+            <div>
+              <dt id="fact-label-2">输出</dt>
+              <dd id="fact-value-2">empty_like(Q)</dd>
+            </div>
+            <div>
+              <dt id="fact-label-3">启动</dt>
+              <dd id="fact-value-3">grid(D,S,BH)</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="mental-model">
+          <h2>由易到难</h2>
+          <ol>
+            <li class="is-current" data-mental="0">
+              <span>入口</span>
+              <small>检查和启动</small>
+            </li>
+            <li data-mental="1">
+              <span>定位</span>
+              <small>一个 block 算一个 O 元素</small>
+            </li>
+            <li data-mental="2">
+              <span>归约</span>
+              <small>max / sum / acc</small>
+            </li>
+          </ol>
+        </section>
+
+        <section class="warning-panel">
+          <h2>容易混淆</h2>
+          <p id="common-mistake">这个文件里的 naive attention 是为了正确性和观察瓶颈，不是追求速度的最终实现。</p>
+        </section>
+      </aside>
+    </section>
+
+    <section class="cheatsheet">
+      <header>
+        <span class="section-label">看完动画后记住</span>
+        <h2>attention.cu 的三条主线</h2>
+      </header>
+      <div class="cheatsheet-grid">
+        <article data-jump-chapter="host">
+          <span>01</span>
+          <h3>入口函数不算结果</h3>
+          <code>attention_naive → launch kernel</code>
+          <p>它负责检查 CUDA、contiguous、float32、形状一致，然后配置 launch。</p>
+        </article>
+        <article data-jump-chapter="kernel">
+          <span>02</span>
+          <h3>Block 只算一个标量</h3>
+          <code>O[b,h,i,d_out]</code>
+          <p>blockIdx.x/y/z 分别映射到输出维度、query 位置、batch/head。</p>
+        </article>
+        <article data-jump-chapter="reduce">
+          <span>03</span>
+          <h3>Softmax 靠两次扫描</h3>
+          <code>max → exp/sum/acc → divide</code>
+          <p>写法直观，但 QK 重算和内存复用不足，所以很适合作为优化起点。</p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>
