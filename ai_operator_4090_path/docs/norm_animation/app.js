@@ -40,13 +40,21 @@ function rmsStats(row) {
 }
 
 function layerOut(row) {
-  const { rowMean, invStd } = layerStats(row);
-  return row.map((value, col) => (value - rowMean) * invStd * gamma[col] + beta[col]);
+  const stats = layerStats(row);
+  return row.map((value, col) => (value - stats.rowMean) * stats.invStd * gamma[col] + beta[col]);
 }
 
 function rmsOut(row) {
-  const { invRms } = rmsStats(row);
-  return row.map((value, col) => value * invRms * gamma[col]);
+  const stats = rmsStats(row);
+  return row.map((value, col) => value * stats.invRms * gamma[col]);
+}
+
+function grouped(values, groupSize) {
+  const groups = [];
+  for (let index = 0; index < values.length; index += groupSize) {
+    groups.push(values.slice(index, index + groupSize));
+  }
+  return groups;
 }
 
 const demoRow = X[activeRow];
@@ -56,9 +64,13 @@ const layerY = X.map(layerOut);
 const rmsY = X.map(rmsOut);
 const demoSquares = demoRow.map((value) => value * value);
 const demoCenteredSquares = demoRow.map((value) => (value - demoLayer.rowMean) ** 2);
+const vecGroups = grouped(demoRow, 4);
+const vecSquareSums = vecGroups.map((group) => sum(group.map((value) => value * value)));
+const vecSums = vecGroups.map(sum);
+const vecVarSums = grouped(demoCenteredSquares, 4).map(sum);
 
-function sourceLine(number, text, active = false) {
-  return { number, text, active };
+function sourceLine(number, text, active) {
+  return { number, text, active: Boolean(active) };
 }
 
 function src(location, explanation, lines) {
@@ -66,585 +78,800 @@ function src(location, explanation, lines) {
 }
 
 const sourceCatalog = {
-  launcherChecks: src("norm.cu:75-83, 92-98", "wrapper 是 CPU 侧入口：先确认 tensor 位于 CUDA、连续、float32，再检查 shape 是否符合 row-wise norm 的假设。", [
-    sourceLine(75, "torch::Tensor layernorm_row(torch::Tensor X, torch::Tensor gamma, torch::Tensor beta, double eps) {", true),
-    sourceLine(76, "    CHECK_INPUT(X);", true),
-    sourceLine(77, "    CHECK_INPUT(gamma);", true),
-    sourceLine(78, "    CHECK_INPUT(beta);", true),
-    sourceLine(79, "    TORCH_CHECK(X.dim() == 2, \"X must be 2D [rows, cols]\");", true),
-    sourceLine(80, "    TORCH_CHECK(gamma.dim() == 1 && beta.dim() == 1, \"gamma/beta must be 1D\");"),
-    sourceLine(81, "    TORCH_CHECK(gamma.size(0) == X.size(1) && beta.size(0) == X.size(1), \"gamma/beta size mismatch\");"),
-    sourceLine(92, "torch::Tensor rmsnorm_row(torch::Tensor X, torch::Tensor gamma, double eps) {"),
-    sourceLine(93, "    CHECK_INPUT(X);"),
-    sourceLine(94, "    CHECK_INPUT(gamma);"),
+  rowLaunchers: src("norm.cu:229-258", "基础入口还是最直接：检查输入，拿 rows/cols，分配 Y，然后启动 row kernel。", [
+    sourceLine(229, "torch::Tensor layernorm_row(torch::Tensor X, torch::Tensor gamma, torch::Tensor beta, double eps) {", true),
+    sourceLine(230, "    CHECK_INPUT(X);"),
+    sourceLine(236, "    int rows = static_cast<int>(X.size(0));", true),
+    sourceLine(237, "    int cols = static_cast<int>(X.size(1));", true),
+    sourceLine(238, "    auto Y = torch::empty_like(X);"),
+    sourceLine(239, "    int block = 256;", true),
+    sourceLine(240, "    layernorm_row_kernel<<<rows, block, block * sizeof(float)>>>("),
+    sourceLine(246, "torch::Tensor rmsnorm_row(torch::Tensor X, torch::Tensor gamma, double eps) {", true),
+    sourceLine(255, "    rmsnorm_row_kernel<<<rows, block, block * sizeof(float)>>>("),
   ]),
-  launcherShape: src("norm.cu:82-88", "rows 决定启动多少个 block，cols 决定每个 block 处理的一行有多长。", [
-    sourceLine(82, "    int rows = static_cast<int>(X.size(0));", true),
-    sourceLine(83, "    int cols = static_cast<int>(X.size(1));", true),
-    sourceLine(84, "    auto Y = torch::empty_like(X);", true),
-    sourceLine(85, "    int block = 256;", true),
-    sourceLine(86, "    layernorm_row_kernel<<<rows, block, block * sizeof(float)>>>("),
-    sourceLine(87, "        X.data_ptr<float>(), gamma.data_ptr<float>(), beta.data_ptr<float>(),"),
-    sourceLine(88, "        Y.data_ptr<float>(), rows, cols, static_cast<float>(eps));"),
+  warpLaunchers: src("norm.cu:261-318", "warp-reduce 入口多了空矩阵快速返回；规约逻辑进入 block_reduce_sum，kernel 本身更短。", [
+    sourceLine(261, "torch::Tensor layernorm_warp_reduce(torch::Tensor X, torch::Tensor gamma, torch::Tensor beta, double eps) {", true),
+    sourceLine(268, "    int rows = static_cast<int>(X.size(0));"),
+    sourceLine(269, "    int cols = static_cast<int>(X.size(1));"),
+    sourceLine(270, "    auto Y = torch::empty_like(X);"),
+    sourceLine(271, "    if (rows == 0 || cols == 0) return Y;", true),
+    sourceLine(273, "    layernorm_warp_reduce_kernel<<<rows, block, block * sizeof(float)>>>("),
+    sourceLine(305, "torch::Tensor rmsnorm_warp_reduce(torch::Tensor X, torch::Tensor gamma, double eps) {", true),
+    sourceLine(315, "    rmsnorm_warp_reduce_kernel<<<rows, block, block * sizeof(float)>>>("),
   ]),
-  launcherRms: src("norm.cu:97-104", "RMSNorm 的 wrapper 少一个 beta，但 launch 结构一样：rows 个 block，每个 block 256 个线程，动态 shared memory 放 256 个 float。", [
-    sourceLine(97, "    int rows = static_cast<int>(X.size(0));", true),
-    sourceLine(98, "    int cols = static_cast<int>(X.size(1));", true),
-    sourceLine(99, "    auto Y = torch::empty_like(X);", true),
-    sourceLine(100, "    int block = 256;", true),
-    sourceLine(101, "    rmsnorm_row_kernel<<<rows, block, block * sizeof(float)>>>("),
-    sourceLine(102, "        X.data_ptr<float>(), gamma.data_ptr<float>(), Y.data_ptr<float>(),"),
-    sourceLine(103, "        rows, cols, static_cast<float>(eps));"),
-    sourceLine(104, "    return Y;"),
+  vectorLaunchers: src("norm.cu:279-343", "vectorized 入口先判断 cols 和指针是否适合 float4；条件不满足就退回 warp_reduce kernel，保证正确性。", [
+    sourceLine(279, "torch::Tensor layernorm_vectorized(torch::Tensor X, torch::Tensor gamma, torch::Tensor beta, double eps) {", true),
+    sourceLine(289, "    if (rows == 0 || cols == 0) return Y;"),
+    sourceLine(291, "    bool can_vectorize = (cols % 4 == 0) && is_aligned_16(X) && is_aligned_16(gamma) &&", true),
+    sourceLine(292, "                          is_aligned_16(beta) && is_aligned_16(Y);", true),
+    sourceLine(293, "    if (can_vectorize) {", true),
+    sourceLine(294, "        layernorm_vectorized_kernel<<<rows, block, block * sizeof(float)>>>("),
+    sourceLine(297, "    } else {", true),
+    sourceLine(298, "        layernorm_warp_reduce_kernel<<<rows, block, block * sizeof(float)>>>("),
+    sourceLine(321, "torch::Tensor rmsnorm_vectorized(torch::Tensor X, torch::Tensor gamma, double eps) {"),
+    sourceLine(333, "    if (can_vectorize) {"),
+    sourceLine(338, "        rmsnorm_warp_reduce_kernel<<<rows, block, block * sizeof(float)>>>("),
   ]),
-  rmsMap: src("norm.cu:51-58", "一个 block 负责一行；动画中的 8 个 lane 代表真实代码里的 256 个线程。", [
-    sourceLine(51, "    extern __shared__ float smem[];", true),
-    sourceLine(52, "    int row = blockIdx.x;", true),
-    sourceLine(53, "    int tid = threadIdx.x;", true),
-    sourceLine(55, "    float local_sum_sq = 0.0f;"),
-    sourceLine(56, "    for (int col = tid; col < cols; col += blockDim.x) {", true),
-    sourceLine(57, "        float v = X[row * cols + col];", true),
-    sourceLine(58, "        local_sum_sq += v * v;", true),
+  align: src("norm.cu:31-32, 291-292", "float4 一次读写 16 字节，所以 X、gamma、beta、Y 的地址都要 16 字节对齐。", [
+    sourceLine(31, "bool is_aligned_16(const torch::Tensor& tensor) {", true),
+    sourceLine(32, "    return (reinterpret_cast<std::uintptr_t>(tensor.data_ptr<float>()) % 16) == 0;", true),
+    sourceLine(291, "    bool can_vectorize = (cols % 4 == 0) && is_aligned_16(X) && is_aligned_16(gamma) &&", true),
+    sourceLine(292, "                          is_aligned_16(beta) && is_aligned_16(Y);", true),
   ]),
-  rmsReduce: src("norm.cu:60-66", "每个线程先把自己的局部平方和写入 smem，然后通过 stride 逐半缩小的 reduction 合成总平方和。", [
-    sourceLine(60, "    smem[tid] = local_sum_sq;", true),
-    sourceLine(61, "    __syncthreads();", true),
-    sourceLine(62, "    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {", true),
-    sourceLine(63, "        if (tid < stride) smem[tid] += smem[tid + stride];", true),
-    sourceLine(64, "        __syncthreads();", true),
-    sourceLine(66, "    float inv_rms = rsqrtf(smem[0] / cols + eps);"),
+  rowRmsMap: src("norm.cu:75-87", "基础 RMSNorm kernel 里，一个 block 处理一行，线程用 tid 跨步扫描 cols。", [
+    sourceLine(75, "__global__ void rmsnorm_row_kernel(const float* __restrict__ X,", true),
+    sourceLine(79, "    extern __shared__ float smem[];"),
+    sourceLine(80, "    int row = blockIdx.x;", true),
+    sourceLine(81, "    int tid = threadIdx.x;", true),
+    sourceLine(83, "    float local_sum_sq = 0.0f;"),
+    sourceLine(84, "    for (int col = tid; col < cols; col += blockDim.x) {", true),
+    sourceLine(85, "        float v = X[row * cols + col];"),
+    sourceLine(86, "        local_sum_sq += v * v;", true),
   ]),
-  rmsScale: src("norm.cu:66-70", "RMSNorm 不减 mean；它直接用 inv_rms 缩放原值，再乘 gamma[col]。", [
-    sourceLine(66, "    float inv_rms = rsqrtf(smem[0] / cols + eps);", true),
-    sourceLine(68, "    for (int col = tid; col < cols; col += blockDim.x) {", true),
-    sourceLine(69, "        Y[row * cols + col] = X[row * cols + col] * inv_rms * gamma[col];", true),
-    sourceLine(70, "    }"),
+  rowRmsReduce: src("norm.cu:88-98", "基础版把每个线程的局部平方和写进 smem，再用 stride 逐半缩小做树形规约。", [
+    sourceLine(88, "    smem[tid] = local_sum_sq;", true),
+    sourceLine(89, "    __syncthreads();", true),
+    sourceLine(90, "    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {", true),
+    sourceLine(91, "        if (tid < stride) smem[tid] += smem[tid + stride];", true),
+    sourceLine(92, "        __syncthreads();"),
+    sourceLine(94, "    float inv_rms = rsqrtf(smem[0] / cols + eps);", true),
+    sourceLine(96, "    for (int col = tid; col < cols; col += blockDim.x) {"),
+    sourceLine(97, "        Y[row * cols + col] = X[row * cols + col] * inv_rms * gamma[col];", true),
   ]),
-  layerMap: src("norm.cu:12-19", "LayerNorm 也采用 1 block / row。第一轮遍历先为 mean 准备每个线程的局部和。", [
-    sourceLine(12, "    extern __shared__ float smem[];", true),
-    sourceLine(13, "    int row = blockIdx.x;", true),
-    sourceLine(14, "    int tid = threadIdx.x;", true),
-    sourceLine(16, "    float local_sum = 0.0f;"),
-    sourceLine(17, "    for (int col = tid; col < cols; col += blockDim.x) {", true),
-    sourceLine(18, "        local_sum += X[row * cols + col];", true),
-    sourceLine(19, "    }"),
+  rowLayerMean: src("norm.cu:35-54", "基础 LayerNorm 先求整行 mean；这一段和 RMSNorm 的树形规约形式一样。", [
+    sourceLine(35, "__global__ void layernorm_row_kernel(const float* __restrict__ X,", true),
+    sourceLine(40, "    extern __shared__ float smem[];"),
+    sourceLine(41, "    int row = blockIdx.x;"),
+    sourceLine(42, "    int tid = threadIdx.x;"),
+    sourceLine(44, "    float local_sum = 0.0f;", true),
+    sourceLine(45, "    for (int col = tid; col < cols; col += blockDim.x) {", true),
+    sourceLine(48, "    smem[tid] = local_sum;", true),
+    sourceLine(50, "    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {"),
+    sourceLine(54, "    float mean = smem[0] / cols;", true),
   ]),
-  layerMean: src("norm.cu:20-26", "mean 来自整行的总和：线程把局部和写到 smem，再在 block 内规约到 smem[0]。", [
-    sourceLine(20, "    smem[tid] = local_sum;", true),
-    sourceLine(21, "    __syncthreads();", true),
-    sourceLine(22, "    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {", true),
-    sourceLine(23, "        if (tid < stride) smem[tid] += smem[tid + stride];", true),
-    sourceLine(24, "        __syncthreads();", true),
-    sourceLine(26, "    float mean = smem[0] / cols;", true),
+  rowLayerVar: src("norm.cu:56-72", "LayerNorm 知道 mean 后，还要第二遍扫描计算 variance，最后套 gamma/beta。", [
+    sourceLine(56, "    float local_var = 0.0f;", true),
+    sourceLine(57, "    for (int col = tid; col < cols; col += blockDim.x) {", true),
+    sourceLine(58, "        float v = X[row * cols + col] - mean;", true),
+    sourceLine(59, "        local_var += v * v;", true),
+    sourceLine(61, "    smem[tid] = local_var;"),
+    sourceLine(67, "    float inv_std = rsqrtf(smem[0] / cols + eps);", true),
+    sourceLine(70, "        float norm = (X[row * cols + col] - mean) * inv_std;", true),
+    sourceLine(71, "        Y[row * cols + col] = norm * gamma[col] + beta[col];", true),
   ]),
-  layerVar: src("norm.cu:28-39", "有了 mean 后，第二轮遍历计算 (x - mean)^2，再做第二次 reduction 得到 variance。", [
-    sourceLine(28, "    float local_var = 0.0f;", true),
-    sourceLine(29, "    for (int col = tid; col < cols; col += blockDim.x) {", true),
-    sourceLine(30, "        float v = X[row * cols + col] - mean;", true),
-    sourceLine(31, "        local_var += v * v;", true),
-    sourceLine(33, "    smem[tid] = local_var;"),
-    sourceLine(35, "    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {"),
-    sourceLine(39, "    float inv_std = rsqrtf(smem[0] / cols + eps);", true),
+  warpReduceSum: src("norm.cu:8-12", "warp_reduce_sum 用 shuffle 在一个 warp 内交换寄存器值，不需要每一轮都写 shared memory。", [
+    sourceLine(8, "__forceinline__ __device__ float warp_reduce_sum(float val) {", true),
+    sourceLine(9, "    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {", true),
+    sourceLine(10, "        val += __shfl_down_sync(0xffffffff, val, offset);", true),
+    sourceLine(11, "    }"),
+    sourceLine(12, "    return val;", true),
   ]),
-  layerWrite: src("norm.cu:41-44", "最后每个线程回到自己负责的列，套用 affine：先标准化，再乘 gamma，加 beta。", [
-    sourceLine(41, "    for (int col = tid; col < cols; col += blockDim.x) {", true),
-    sourceLine(42, "        float norm = (X[row * cols + col] - mean) * inv_std;", true),
-    sourceLine(43, "        Y[row * cols + col] = norm * gamma[col] + beta[col];", true),
-    sourceLine(44, "    }"),
+  blockReduceSum: src("norm.cu:15-29", "block_reduce_sum 先让每个 warp 内部规约，再把每个 warp 的结果放进 smem，最后由 warp 0 合并。", [
+    sourceLine(15, "__forceinline__ __device__ float block_reduce_sum(float val, float* smem) {", true),
+    sourceLine(16, "    int lane = threadIdx.x & (warpSize - 1);", true),
+    sourceLine(17, "    int warp_id = threadIdx.x / warpSize;", true),
+    sourceLine(18, "    int warp_count = (blockDim.x + warpSize - 1) / warpSize;"),
+    sourceLine(20, "    val = warp_reduce_sum(val);", true),
+    sourceLine(21, "    if (lane == 0) smem[warp_id] = val;", true),
+    sourceLine(24, "    val = (threadIdx.x < warp_count) ? smem[lane] : 0.0f;"),
+    sourceLine(25, "    if (warp_id == 0) val = warp_reduce_sum(val);", true),
+    sourceLine(26, "    if (threadIdx.x == 0) smem[0] = val;"),
+    sourceLine(28, "    return smem[0];", true),
+  ]),
+  warpRmsKernel: src("norm.cu:130-148", "RMSNorm 的 warp-reduce 版保留数学流程，只把 smem 树形规约替换成 block_reduce_sum。", [
+    sourceLine(130, "__global__ void rmsnorm_warp_reduce_kernel(const float* __restrict__ X,", true),
+    sourceLine(135, "    int row = blockIdx.x;"),
+    sourceLine(137, "    if (row >= rows) return;", true),
+    sourceLine(139, "    float local_sum_sq = 0.0f;"),
+    sourceLine(140, "    for (int col = tid; col < cols; col += blockDim.x) {", true),
+    sourceLine(142, "        local_sum_sq += v * v;", true),
+    sourceLine(144, "    float inv_rms = rsqrtf(block_reduce_sum(local_sum_sq, smem) / cols + eps);", true),
+    sourceLine(147, "        Y[row * cols + col] = X[row * cols + col] * inv_rms * gamma[col];"),
+  ]),
+  warpLayerKernel: src("norm.cu:101-127", "LayerNorm 的 warp-reduce 版调用两次 block_reduce_sum：一次求 mean，一次求 variance。", [
+    sourceLine(101, "__global__ void layernorm_warp_reduce_kernel(const float* __restrict__ X,", true),
+    sourceLine(107, "    int row = blockIdx.x;"),
+    sourceLine(109, "    if (row >= rows) return;", true),
+    sourceLine(111, "    float local_sum = 0.0f;"),
+    sourceLine(115, "    float mean = block_reduce_sum(local_sum, smem) / cols;", true),
+    sourceLine(117, "    float local_var = 0.0f;"),
+    sourceLine(122, "    float inv_std = rsqrtf(block_reduce_sum(local_var, smem) / cols + eps);", true),
+    sourceLine(126, "        Y[row * cols + col] = norm * gamma[col] + beta[col];", true),
+  ]),
+  vectorRms: src("norm.cu:196-224", "RMSNorm vectorized kernel 把同一行 reinterpret 成 float4 数组，一次处理 4 个连续列。", [
+    sourceLine(196, "__global__ void rmsnorm_vectorized_kernel(const float* __restrict__ X,", true),
+    sourceLine(203, "    int vec_cols = cols / 4;", true),
+    sourceLine(205, "    const float4* X4 = reinterpret_cast<const float4*>(X + row * cols);", true),
+    sourceLine(207, "    for (int vec_col = tid; vec_col < vec_cols; vec_col += blockDim.x) {", true),
+    sourceLine(208, "        float4 x = X4[vec_col];", true),
+    sourceLine(209, "        local_sum_sq += x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w;", true),
+    sourceLine(211, "    float inv_rms = rsqrtf(block_reduce_sum(local_sum_sq, smem) / cols + eps);"),
+    sourceLine(213, "    float4* Y4 = reinterpret_cast<float4*>(Y + row * cols);", true),
+    sourceLine(214, "    const float4* G4 = reinterpret_cast<const float4*>(gamma);", true),
+    sourceLine(219, "        y.x = x.x * inv_rms * g.x;"),
+    sourceLine(223, "        Y4[vec_col] = y;", true),
+  ]),
+  vectorLayer: src("norm.cu:151-193", "LayerNorm vectorized 版同样用 float4，只是 sum 和 variance 都要把 x/y/z/w 四个分量累进去。", [
+    sourceLine(151, "__global__ void layernorm_vectorized_kernel(const float* __restrict__ X,", true),
+    sourceLine(159, "    int vec_cols = cols / 4;", true),
+    sourceLine(161, "    const float4* X4 = reinterpret_cast<const float4*>(X + row * cols);", true),
+    sourceLine(163, "    for (int vec_col = tid; vec_col < vec_cols; vec_col += blockDim.x) {", true),
+    sourceLine(164, "        float4 x = X4[vec_col];", true),
+    sourceLine(165, "        local_sum += x.x + x.y + x.z + x.w;", true),
+    sourceLine(167, "    float mean = block_reduce_sum(local_sum, smem) / cols;"),
+    sourceLine(176, "        local_var += v0 * v0 + v1 * v1 + v2 * v2 + v3 * v3;", true),
+    sourceLine(180, "    float4* Y4 = reinterpret_cast<float4*>(Y + row * cols);", true),
+    sourceLine(188, "        y.x = (x.x - mean) * inv_std * g.x + b.x;", true),
+    sourceLine(192, "        Y4[vec_col] = y;", true),
   ]),
 };
 
-const common = {
-  activeRow: [activeRow],
-  activeCols: [0, 1, 2, 3, 4, 5, 6, 7],
-};
+const allCols = [0, 1, 2, 3, 4, 5, 6, 7];
+
+function makeStep(base) {
+  const defaults = {
+    activeRow: [activeRow],
+    activeCols: [],
+    activeGamma: [],
+    activeBeta: [],
+    hostState: "准备",
+    gridState: "rows 个 block",
+    blockState: "256 threads",
+    pipe: [],
+    hostArrow: false,
+    gridArrow: false,
+    concept: 0,
+    smem: null,
+    smemActive: [],
+    thread: "idle",
+    output: null,
+    showAllOutput: false,
+    betaMode: "normal",
+    stats: [],
+  };
+  return Object.assign({}, defaults, base);
+}
 
 const launcherSteps = [
-  {
-    label: "最外层入口",
-    title: "Python 调用进入 C++ wrapper",
-    calculation: "ops.layernorm_row(x, gamma, beta) → _C.layernorm_row(...)",
-    detail: "先不要急着看 GPU。norm.cu 的公开函数是 CPU 侧包装器，它负责把 Python tensor 变成 kernel 参数。",
-    hostState: "接收 tensor",
-    gridState: "尚未 launch",
-    blockState: "等待配置",
+  makeStep({
+    label: "入口总览",
+    title: "新版 norm.cu 暴露 6 个 norm API",
+    calculation: "layernorm/rmsnorm × row/warp_reduce/vectorized",
+    detail: "先从外层看：row 是基础版，warp_reduce 改规约方式，vectorized 在满足条件时走 float4，否则 fallback 到 warp_reduce。",
+    hostState: "Python API",
+    gridState: "未 launch",
+    blockState: "等待选择",
     pipe: ["host"],
-    concept: 0,
-    source: sourceCatalog.launcherChecks,
+    source: sourceCatalog.rowLaunchers,
     stats: [
-      ["输入", "X, gamma, beta"],
-      ["位置", "CPU host code"],
-      ["职责", "参数检查"],
-      ["下一步", "提取 rows/cols"],
+      ["LayerNorm", "row / warp / vectorized"],
+      ["RMSNorm", "row / warp / vectorized"],
+      ["共同输入", "X[rows, cols]"],
+      ["输出", "Y same shape"],
     ],
-    thread: "idle",
-    smem: null,
-  },
-  {
-    label: "检查形状",
-    title: "X 是二维，gamma/beta 与 cols 对齐",
-    calculation: "X[rows, cols]，gamma[cols]，beta[cols]",
-    detail: "row-wise norm 的意思是：每一行独立归一化，gamma 和 beta 按列广播到每一行。",
-    hostState: "检查 shape",
-    gridState: "rows 未读取",
-    blockState: "block 未配置",
-    pipe: ["host"],
-    concept: 0,
-    source: sourceCatalog.launcherChecks,
-    stats: [
-      ["X", `${X.length} × ${cols}`],
-      ["gamma", `${cols} 个 scale`],
-      ["beta", `${cols} 个 shift`],
-      ["dtype", "float32 CUDA"],
-    ],
-    thread: "idle",
-    smem: null,
-  },
-  {
-    label: "分配输出",
-    title: "rows/cols 决定后，先创建 Y",
-    calculation: "auto Y = torch::empty_like(X)",
-    detail: "输出矩阵的形状和 X 完全一样。kernel 只负责把每个位置的值算出来并写进去。",
-    hostState: "创建 Y",
-    gridState: `${X.length} rows`,
-    blockState: "准备 256 threads",
-    pipe: ["host"],
-    concept: 0,
-    source: sourceCatalog.launcherShape,
-    stats: [
-      ["rows", `${X.length}`],
-      ["cols", `${cols}`],
-      ["Y", "empty_like(X)"],
-      ["内存", "CUDA tensor"],
-    ],
-    thread: "idle",
-    smem: null,
-  },
-  {
-    label: "配置 kernel",
-    title: "一行数据交给一个 CUDA block",
-    calculation: "layernorm_row_kernel<<<rows, 256, 256*sizeof(float)>>>(...)",
-    detail: "真实代码中 block=256。动画用 8 个 lane 缩小展示，但并行思想一样：线程分工扫同一行的 cols。",
-    hostState: "发起 launch",
-    gridState: "rows 个 block",
+  }),
+  makeStep({
+    label: "基础入口",
+    title: "row 版本直接启动基础 kernel",
+    calculation: "layernorm_row_kernel<<<rows, 256, smem>>>",
+    detail: "这仍然是最好理解的一版：一个 block 处理一行，shared memory 保存每个线程的局部结果。",
+    hostState: "检查 + 分配 Y",
+    gridState: `${X.length} blocks`,
     blockState: "256 threads",
     pipe: ["host", "grid", "block"],
     hostArrow: true,
     gridArrow: true,
     concept: 1,
-    source: sourceCatalog.launcherShape,
-    stats: [
-      ["grid", `${X.length} blocks`],
-      ["block", "256 threads"],
-      ["shared", "256 floats"],
-      ["映射", "1 block / row"],
-    ],
+    source: sourceCatalog.rowLaunchers,
     thread: "row",
-    smem: Array.from({ length: cols }, (_, index) => `lane ${index}`),
-  },
-  {
-    label: "RMSNorm 启动",
-    title: "RMSNorm wrapper 更短：少一个 beta",
-    calculation: "rmsnorm_row_kernel<<<rows, block, block*sizeof(float)>>>(...)",
-    detail: "RMSNorm 的 host 侧和 LayerNorm 几乎一样，只是参数少了 beta，GPU 内部也少一次 mean/variance 流程。",
-    hostState: "启动 RMSNorm",
+    smem: allCols.map((index) => `tid ${index}`),
+    smemActive: allCols,
+    stats: [
+      ["函数", "layernorm_row / rmsnorm_row"],
+      ["kernel", "基础 row kernel"],
+      ["shared", "block floats"],
+      ["难度", "最低"],
+    ],
+  }),
+  makeStep({
+    label: "warp 入口",
+    title: "warp_reduce 版本先处理空矩阵",
+    calculation: "if (rows == 0 || cols == 0) return Y",
+    detail: "新版 wrapper 对空矩阵更稳：先分配空输出，再直接返回，避免 launch 一个没有实际工作的 kernel。",
+    hostState: "空矩阵保护",
+    gridState: "rows/cols checked",
+    blockState: "等待 launch",
+    pipe: ["host"],
+    concept: 0,
+    source: sourceCatalog.warpLaunchers,
+    stats: [
+      ["函数", "layernorm_warp_reduce"],
+      ["函数", "rmsnorm_warp_reduce"],
+      ["新增", "empty return"],
+      ["规约", "block_reduce_sum"],
+    ],
+  }),
+  makeStep({
+    label: "向量化入口",
+    title: "vectorized 版本先判断能不能 float4",
+    calculation: "can_vectorize = cols % 4 == 0 && aligned_16(...)",
+    detail: "float4 一次处理 4 个 float，要求列数按 4 分组，也要求相关指针 16 字节对齐。",
+    hostState: "检查 can_vectorize",
     gridState: "rows 个 block",
-    blockState: "256 threads",
+    blockState: "float4 path?",
+    pipe: ["host"],
+    concept: 4,
+    source: sourceCatalog.vectorLaunchers,
+    thread: "vec",
+    smem: ["vec0", "vec1", "", "", "", "", "", ""],
+    smemActive: [0, 1],
+    activeCols: allCols,
+    stats: [
+      ["cols % 4", cols % 4 === 0 ? "yes" : "no"],
+      ["对齐", "16 bytes"],
+      ["成功", "vectorized_kernel"],
+      ["失败", "warp_reduce_kernel"],
+    ],
+  }),
+  makeStep({
+    label: "fallback",
+    title: "不满足 float4 条件也能正确运行",
+    calculation: "else → *_warp_reduce_kernel<<<rows, block, smem>>>",
+    detail: "vectorized wrapper 的关键不是永远快，而是先尝试快路径，条件不合适时自动回到可靠的 warp-reduce 版本。",
+    hostState: "选择 kernel",
+    gridState: "launch selected",
+    blockState: "warp fallback",
     pipe: ["host", "grid", "block"],
     hostArrow: true,
     gridArrow: true,
-    concept: 1,
-    source: sourceCatalog.launcherRms,
+    concept: 4,
+    source: sourceCatalog.vectorLaunchers,
+    thread: "fallback",
+    smem: ["fast path", "fallback", "", "", "", "", "", ""],
+    smemActive: [0, 1],
     stats: [
-      ["函数", "rmsnorm_row"],
-      ["参数", "X, gamma, eps"],
-      ["少了", "beta"],
-      ["kernel", "rmsnorm_row_kernel"],
+      ["快路径", "float4"],
+      ["回退", "warp reduce"],
+      ["目标", "正确优先"],
+      ["难度", "最高"],
     ],
-    thread: "row",
-    smem: Array.from({ length: cols }, (_, index) => `tid ${index}`),
-  },
+  }),
 ];
 
-const rmsSteps = [
-  {
-    label: "行到 block",
-    title: "blockIdx.x 选择当前行",
-    calculation: "row = blockIdx.x，tid = threadIdx.x",
-    detail: "每个 block 只管一行。不同 block 之间互不通信，所以每行的 RMSNorm 可以独立并行完成。",
-    hostState: "已 launch",
+const rowSteps = [
+  makeStep({
+    label: "行级任务",
+    title: "基础版：一个 block 处理一行",
+    calculation: "row = blockIdx.x；col = tid, tid + blockDim.x, ...",
+    detail: "这是最容易理解的 kernel 版本。动画用 8 个 lane 表示真实代码里的 256 个线程。",
+    hostState: "row kernel",
     gridState: `block ${activeRow} → row ${activeRow}`,
-    blockState: "8 lanes 展示",
+    blockState: "tid scans cols",
     pipe: ["grid", "block"],
     gridArrow: true,
     concept: 0,
-    source: sourceCatalog.rmsMap,
-    stats: [
-      ["row", `${activeRow}`],
-      ["cols", `${cols}`],
-      ["真实线程", "256"],
-      ["动画 lane", "8"],
-    ],
+    source: sourceCatalog.rowRmsMap,
     thread: "row",
-    smem: null,
-  },
-  {
-    label: "平方局部和",
-    title: "每个线程读取自己负责的列",
-    calculation: "local_sum_sq += X[row, col] * X[row, col]",
-    detail: "RMSNorm 不需要先减均值，所以第一件事就是统计这一行所有元素的平方和。",
-    hostState: "kernel running",
+    activeCols: allCols,
+    stats: [
+      ["并行单位", "1 block / row"],
+      ["线程数", "256"],
+      ["动画 lane", "8"],
+      ["数据", "X[row, col]"],
+    ],
+  }),
+  makeStep({
+    label: "RMSNorm",
+    title: "先看简单的 RMSNorm：统计 x²",
+    calculation: "local_sum_sq += x * x",
+    detail: "RMSNorm 不减 mean，只关心这一行的平方均值，所以基础版只需要一次规约。",
+    hostState: "rmsnorm_row",
     gridState: "row blocks",
-    blockState: "threads read X",
+    blockState: "square sum",
     pipe: ["block"],
     concept: 1,
-    source: sourceCatalog.rmsMap,
-    stats: [
-      ["X² 和", fmt(sum(demoSquares))],
-      ["mean(X²)", fmt(demoRms.rowMeanSq)],
-      ["eps", "1e-6"],
-      ["下一步", "写入 smem"],
-    ],
+    source: sourceCatalog.rowRmsMap,
     thread: "square",
+    activeCols: allCols,
     smem: demoSquares,
-    smemActive: common.activeCols,
-    activeCols: common.activeCols,
-  },
-  {
-    label: "写 shared",
-    title: "局部平方和进入 smem[tid]",
-    calculation: "smem[tid] = local_sum_sq；__syncthreads()",
-    detail: "shared memory 属于同一个 block。先写进去，再同步，才能安全地让线程互相读取结果。",
-    hostState: "kernel running",
+    smemActive: allCols,
+    betaMode: "off",
+    stats: [
+      ["sum(x²)", fmt(sum(demoSquares))],
+      ["mean(x²)", fmt(demoRms.rowMeanSq)],
+      ["reduction", "1 次"],
+      ["beta", "不用"],
+    ],
+  }),
+  makeStep({
+    label: "树形规约",
+    title: "基础版用 smem[tid] 和 stride 合成总和",
+    calculation: "if (tid < stride) smem[tid] += smem[tid + stride]",
+    detail: "这就是最朴素的 block 内规约：每一轮同步一次，stride 每次减半。",
+    hostState: "rmsnorm_row",
     gridState: "row blocks",
-    blockState: "smem ready",
+    blockState: "smem reduction",
     pipe: ["block"],
     concept: 2,
-    source: sourceCatalog.rmsReduce,
-    stats: [
-      ["smem[0..7]", "local X²"],
-      ["同步", "__syncthreads"],
-      ["作用域", "同一 block"],
-      ["下一步", "reduction"],
-    ],
-    thread: "smem",
-    smem: demoSquares,
-    smemActive: common.activeCols,
-    activeCols: common.activeCols,
-  },
-  {
-    label: "block reduction",
-    title: "多个线程把 smem 合成一个总和",
-    calculation: "for (stride >>= 1) smem[tid] += smem[tid + stride]",
-    detail: "真实代码从 stride=128 开始逐半缩小。动画直接展示最终结果：整行平方和落在 smem[0]。",
-    hostState: "kernel running",
-    gridState: "row blocks",
-    blockState: "reduce in smem",
-    pipe: ["block"],
-    concept: 3,
-    source: sourceCatalog.rmsReduce,
-    stats: [
-      ["sum(X²)", fmt(sum(demoSquares))],
-      ["mean(X²)", fmt(demoRms.rowMeanSq)],
-      ["smem[0]", "总平方和"],
-      ["下一步", "rsqrt"],
-    ],
+    source: sourceCatalog.rowRmsReduce,
     thread: "reduce",
+    activeCols: allCols,
     smem: [sum(demoSquares), "", "", "", "", "", "", ""],
     smemActive: [0],
-    activeCols: common.activeCols,
-  },
-  {
-    label: "得到 inv_rms",
-    title: "rsqrtf 给出缩放系数",
-    calculation: "inv_rms = rsqrtf(mean(X²) + eps)",
-    detail: "rsqrtf(x) 就是 1 / sqrt(x)。后面每个元素都乘同一个 inv_rms，但 gamma[col] 仍然按列不同。",
-    hostState: "kernel running",
-    gridState: "row blocks",
-    blockState: "compute inv_rms",
-    pipe: ["block"],
-    concept: 3,
-    source: sourceCatalog.rmsScale,
+    betaMode: "off",
     stats: [
-      ["mean(X²)", fmt(demoRms.rowMeanSq)],
-      ["eps", "1e-6"],
+      ["smem[0]", fmt(sum(demoSquares))],
       ["inv_rms", fmt(demoRms.invRms)],
-      ["公式", "x * inv_rms"],
+      ["同步", "每轮 __syncthreads"],
+      ["输出", "x * inv_rms * gamma"],
     ],
-    thread: "inv",
-    smem: [fmt(demoRms.invRms), "", "", "", "", "", "", ""],
-    smemActive: [0],
-    activeCols: common.activeCols,
-  },
-  {
-    label: "写回 Y",
-    title: "每个线程写回自己负责的输出列",
-    calculation: "Y[row, col] = X[row, col] * inv_rms * gamma[col]",
-    detail: "这一步没有 beta，也没有减 mean。RMSNorm 的轻量感就在这里：一次统计，一次缩放。",
-    hostState: "kernel running",
+  }),
+  makeStep({
+    label: "RMS 写回",
+    title: "每个线程写回自己负责的列",
+    calculation: "Y = X * inv_rms * gamma[col]",
+    detail: "RMSNorm 的输出没有 beta。它的轻量感来自：少一次 mean，少一次 variance，少一次 shift。",
+    hostState: "rmsnorm_row",
     gridState: "row blocks",
     blockState: "write Y",
     pipe: ["block"],
-    concept: 4,
-    source: sourceCatalog.rmsScale,
-    stats: [
-      ["输出", "Y[row, col]"],
-      ["scale", "gamma[col]"],
-      ["shift", "无 beta"],
-      ["复杂度", "1 次 reduction"],
-    ],
+    concept: 2,
+    source: sourceCatalog.rowRmsReduce,
     thread: "writeRms",
+    activeCols: allCols,
+    activeGamma: allCols,
+    output: "rms",
+    betaMode: "off",
     smem: [fmt(demoRms.invRms), "", "", "", "", "", "", ""],
     smemActive: [0],
-    activeCols: common.activeCols,
-    activeGamma: common.activeCols,
-    output: "rms",
-  },
-  {
-    label: "RMSNorm 总结",
-    title: "RMSNorm = 统计均方根 + 按列缩放",
-    calculation: "y = x / sqrt(mean(x²) + eps) * gamma",
-    detail: "它比 LayerNorm 少了 mean 和 beta，所以常见于追求更轻量的 Transformer 结构。",
-    hostState: "完成",
-    gridState: "all rows done",
-    blockState: "Y ready",
-    pipe: ["grid", "block"],
-    concept: 4,
-    source: sourceCatalog.rmsScale,
     stats: [
       ["函数", "rmsnorm_row_kernel"],
       ["统计量", "mean(x²)"],
-      ["reduction", "1 次"],
-      ["输出", "x * inv_rms * gamma"],
+      ["公式", "x * inv_rms * gamma"],
+      ["难度", "基础"],
     ],
-    thread: "writeRms",
-    smem: [fmt(demoRms.invRms), "", "", "", "", "", "", ""],
-    smemActive: [0],
-    activeCols: common.activeCols,
-    activeGamma: common.activeCols,
-    output: "rms",
-    showAllOutput: true,
-  },
-];
-
-const layerSteps = [
-  {
-    label: "行到 block",
-    title: "LayerNorm 也从 1 block / row 开始",
-    calculation: "row = blockIdx.x，tid = threadIdx.x",
-    detail: "并行映射和 RMSNorm 一样。难点不是线程映射，而是多了 mean 和 variance 两轮统计。",
-    hostState: "已 launch",
-    gridState: `block ${activeRow} → row ${activeRow}`,
-    blockState: "8 lanes 展示",
-    pipe: ["grid", "block"],
-    gridArrow: true,
-    concept: 0,
-    source: sourceCatalog.layerMap,
-    stats: [
-      ["row", `${activeRow}`],
-      ["cols", `${cols}`],
-      ["目标", "mean/var"],
-      ["reduction", "2 次"],
-    ],
-    thread: "row",
-    smem: null,
-  },
-  {
-    label: "求局部和",
-    title: "第一遍扫 X，准备求 mean",
-    calculation: "local_sum += X[row, col]",
-    detail: "每个线程负责一部分列。真实 cols 比 256 大时，同一个线程会 col += blockDim.x 继续处理后面的列。",
-    hostState: "kernel running",
+  }),
+  makeStep({
+    label: "LayerNorm mean",
+    title: "LayerNorm 多一步：先求 mean",
+    calculation: "mean = sum(row) / cols",
+    detail: "LayerNorm 的第一轮规约求原值总和。它和 RMS 的平方和规约形式一样，只是统计对象变了。",
+    hostState: "layernorm_row",
     gridState: "row blocks",
-    blockState: "threads read X",
+    blockState: "sum X",
     pipe: ["block"],
     concept: 1,
-    source: sourceCatalog.layerMap,
-    stats: [
-      ["sum(X)", fmt(sum(demoRow))],
-      ["cols", `${cols}`],
-      ["mean", "待归约"],
-      ["下一步", "smem"],
-    ],
+    source: sourceCatalog.rowLayerMean,
     thread: "sum",
+    activeCols: allCols,
     smem: demoRow,
-    smemActive: common.activeCols,
-    activeCols: common.activeCols,
-  },
-  {
-    label: "规约 mean",
-    title: "smem[0] 得到整行总和",
-    calculation: "mean = smem[0] / cols",
-    detail: "和 RMSNorm 的 reduction 结构一样，只是这里统计的是原值总和，而不是平方和。",
-    hostState: "kernel running",
-    gridState: "row blocks",
-    blockState: "reduce sum",
-    pipe: ["block"],
-    concept: 3,
-    source: sourceCatalog.layerMean,
+    smemActive: allCols,
     stats: [
-      ["sum(X)", fmt(sum(demoRow))],
+      ["sum(x)", fmt(sum(demoRow))],
       ["mean", fmt(demoLayer.rowMean)],
-      ["smem[0]", "总和"],
+      ["reduction", "第 1 次"],
       ["下一步", "variance"],
     ],
-    thread: "reduce",
-    smem: [sum(demoRow), "", "", "", "", "", "", ""],
-    smemActive: [0],
-    activeCols: common.activeCols,
-  },
-  {
-    label: "求方差",
-    title: "第二遍扫 X，统计 (x - mean)²",
-    calculation: "local_var += (X[row, col] - mean)²",
-    detail: "方差必须先知道 mean，所以 LayerNorm 需要第二轮遍历和第二次 block reduction。",
-    hostState: "kernel running",
+  }),
+  makeStep({
+    label: "LayerNorm variance",
+    title: "第二轮扫描：统计 (x - mean)²",
+    calculation: "local_var += (x - mean) * (x - mean)",
+    detail: "只有知道 mean 之后才能算 variance，所以 LayerNorm 比 RMSNorm 多一轮读 X 和一轮规约。",
+    hostState: "layernorm_row",
     gridState: "row blocks",
-    blockState: "threads read X again",
+    blockState: "variance",
     pipe: ["block"],
-    concept: 1,
-    source: sourceCatalog.layerVar,
-    stats: [
-      ["mean", fmt(demoLayer.rowMean)],
-      ["sum((x-mean)²)", fmt(sum(demoCenteredSquares))],
-      ["variance", "待归约"],
-      ["下一步", "rsqrt"],
-    ],
+    concept: 2,
+    source: sourceCatalog.rowLayerVar,
     thread: "variance",
+    activeCols: allCols,
     smem: demoCenteredSquares,
-    smemActive: common.activeCols,
-    activeCols: common.activeCols,
-  },
-  {
-    label: "规约 variance",
-    title: "第二次 reduction 得到 inv_std",
-    calculation: "inv_std = rsqrtf(variance + eps)",
-    detail: "variance 是均方偏差。加 eps 是为了避免极小方差导致除零或数值不稳定。",
-    hostState: "kernel running",
-    gridState: "row blocks",
-    blockState: "reduce variance",
-    pipe: ["block"],
-    concept: 3,
-    source: sourceCatalog.layerVar,
-    stats: [
-      ["variance", fmt(demoLayer.rowVar)],
-      ["eps", "1e-5"],
-      ["inv_std", fmt(demoLayer.invStd)],
-      ["下一步", "affine"],
-    ],
-    thread: "reduce",
-    smem: [sum(demoCenteredSquares), "", "", "", "", "", "", ""],
-    smemActive: [0],
-    activeCols: common.activeCols,
-  },
-  {
-    label: "标准化",
-    title: "先把每个元素变成均值 0、方差 1 附近",
-    calculation: "norm = (X[row, col] - mean) * inv_std",
-    detail: "这一层还没有 gamma/beta，只是把这一行重新拉到统一尺度。",
-    hostState: "kernel running",
-    gridState: "row blocks",
-    blockState: "normalize",
-    pipe: ["block"],
-    concept: 4,
-    source: sourceCatalog.layerWrite,
+    smemActive: allCols,
     stats: [
       ["mean", fmt(demoLayer.rowMean)],
+      ["var", fmt(demoLayer.rowVar)],
       ["inv_std", fmt(demoLayer.invStd)],
-      ["norm", "(x - mean) * inv_std"],
-      ["下一步", "gamma/beta"],
+      ["reduction", "第 2 次"],
     ],
-    thread: "normalize",
-    smem: [fmt(demoLayer.invStd), "", "", "", "", "", "", ""],
-    smemActive: [0],
-    activeCols: common.activeCols,
-  },
-  {
+  }),
+  makeStep({
     label: "Affine 写回",
-    title: "gamma 缩放，beta 平移，写入 Y",
-    calculation: "Y[row, col] = norm * gamma[col] + beta[col]",
-    detail: "gamma 和 beta 是按列使用的参数。每一行都会复用同一组 gamma/beta。",
-    hostState: "kernel running",
+    title: "最后套 gamma 和 beta",
+    calculation: "Y = (X - mean) * inv_std * gamma[col] + beta[col]",
+    detail: "gamma 是缩放，beta 是平移；同一组 gamma/beta 会广播到每一行。",
+    hostState: "layernorm_row",
     gridState: "row blocks",
     blockState: "write Y",
     pipe: ["block"],
-    concept: 4,
-    source: sourceCatalog.layerWrite,
-    stats: [
-      ["输出", "Y[row, col]"],
-      ["scale", "gamma[col]"],
-      ["shift", "beta[col]"],
-      ["复杂度", "2 次 reduction"],
-    ],
+    concept: 2,
+    source: sourceCatalog.rowLayerVar,
     thread: "writeLayer",
+    activeCols: allCols,
+    activeGamma: allCols,
+    activeBeta: allCols,
+    output: "layer",
     smem: [fmt(demoLayer.invStd), "", "", "", "", "", "", ""],
     smemActive: [0],
-    activeCols: common.activeCols,
-    activeGamma: common.activeCols,
-    activeBeta: common.activeCols,
-    output: "layer",
-  },
-  {
-    label: "LayerNorm 总结",
-    title: "LayerNorm = mean + variance + affine",
-    calculation: "y = (x - mean) / sqrt(var + eps) * gamma + beta",
-    detail: "它比 RMSNorm 多减均值、多加 beta，也多一次统计方差的成本。",
-    hostState: "完成",
-    gridState: "all rows done",
-    blockState: "Y ready",
-    pipe: ["grid", "block"],
-    concept: 4,
-    source: sourceCatalog.layerWrite,
     stats: [
       ["函数", "layernorm_row_kernel"],
-      ["统计量", "mean, variance"],
-      ["reduction", "2 次"],
-      ["输出", "norm * gamma + beta"],
+      ["统计量", "mean + variance"],
+      ["公式", "norm * gamma + beta"],
+      ["成本", "2 次 reduction"],
     ],
+  }),
+];
+
+const warpSteps = [
+  makeStep({
+    label: "为什么优化",
+    title: "基础树形规约每轮都要 shared memory 和同步",
+    calculation: "smem[tid] += smem[tid + stride]；__syncthreads()",
+    detail: "warp-reduce 版本先把规约抽成 helper，然后用 warp shuffle 减少 shared memory 参与的次数。",
+    hostState: "warp helper",
+    gridState: "same rows",
+    blockState: "reduce faster",
+    pipe: ["block"],
+    concept: 3,
+    source: sourceCatalog.blockReduceSum,
+    thread: "reduce",
+    activeCols: allCols,
+    smem: ["warp0", "warp1", "warp2", "warp3", "warp4", "warp5", "warp6", "warp7"],
+    smemActive: allCols,
+    stats: [
+      ["目标", "减少同步和 smem 压力"],
+      ["工具", "warp shuffle"],
+      ["封装", "block_reduce_sum"],
+      ["输出", "smem[0]"],
+    ],
+  }),
+  makeStep({
+    label: "warp 内规约",
+    title: "warp_reduce_sum 在寄存器之间交换值",
+    calculation: "val += __shfl_down_sync(mask, val, offset)",
+    detail: "同一个 warp 里的线程可以用 shuffle 直接取到其他 lane 的 val，不必每次都落到 shared memory。",
+    hostState: "warp_reduce_sum",
+    gridState: "warp lanes",
+    blockState: "shuffle",
+    pipe: ["block"],
+    concept: 3,
+    source: sourceCatalog.warpReduceSum,
+    thread: "shuffle",
+    activeCols: allCols,
+    smem: ["lane+16", "lane+8", "lane+4", "lane+2", "lane+1", "", "", ""],
+    smemActive: [0, 1, 2, 3, 4],
+    stats: [
+      ["offset", "16, 8, 4, 2, 1"],
+      ["范围", "一个 warp"],
+      ["内存", "寄存器交换"],
+      ["函数", "warp_reduce_sum"],
+    ],
+  }),
+  makeStep({
+    label: "block 规约",
+    title: "每个 warp 的 lane0 写入 smem[warp_id]",
+    calculation: "if (lane == 0) smem[warp_id] = val",
+    detail: "block 里通常有多个 warp。第一阶段每个 warp 得到一个局部总和，再把这个总和交给 shared memory。",
+    hostState: "block_reduce_sum",
+    gridState: "warp groups",
+    blockState: "warp sums",
+    pipe: ["block"],
+    concept: 3,
+    source: sourceCatalog.blockReduceSum,
+    thread: "warpWrite",
+    activeCols: allCols,
+    smem: ["warp0 sum", "warp1 sum", "warp2 sum", "warp3 sum", "warp4 sum", "warp5 sum", "warp6 sum", "warp7 sum"],
+    smemActive: allCols,
+    stats: [
+      ["lane", "threadIdx.x & 31"],
+      ["warp_id", "threadIdx.x / 32"],
+      ["smem", "每 warp 一个值"],
+      ["同步", "跨 warp 前需要"],
+    ],
+  }),
+  makeStep({
+    label: "warp0 汇总",
+    title: "warp 0 再把所有 warp 的结果合成 smem[0]",
+    calculation: "if (warp_id == 0) val = warp_reduce_sum(val)",
+    detail: "第二阶段只让 warp 0 工作。最后 thread 0 把 block 总和写进 smem[0]，供所有线程读取。",
+    hostState: "block_reduce_sum",
+    gridState: "warp 0",
+    blockState: "final sum",
+    pipe: ["block"],
+    concept: 3,
+    source: sourceCatalog.blockReduceSum,
+    thread: "warpFinal",
+    activeCols: allCols,
+    smem: ["block sum", "", "", "", "", "", "", ""],
+    smemActive: [0],
+    stats: [
+      ["结果", "smem[0]"],
+      ["返回", "return smem[0]"],
+      ["同步", "写完后同步"],
+      ["复用", "RMS + Layer"],
+    ],
+  }),
+  makeStep({
+    label: "RMS warp kernel",
+    title: "RMSNorm 只调用一次 block_reduce_sum",
+    calculation: "inv_rms = rsqrtf(block_reduce_sum(local_sum_sq, smem) / cols + eps)",
+    detail: "数学不变，优化点只在规约实现：基础版显式写 stride 循环，warp 版交给 helper。",
+    hostState: "rmsnorm_warp_reduce",
+    gridState: "row blocks",
+    blockState: "block_reduce_sum",
+    pipe: ["block"],
+    concept: 3,
+    source: sourceCatalog.warpRmsKernel,
+    thread: "writeRms",
+    activeCols: allCols,
+    activeGamma: allCols,
+    output: "rms",
+    betaMode: "off",
+    smem: [fmt(demoRms.invRms), "", "", "", "", "", "", ""],
+    smemActive: [0],
+    stats: [
+      ["kernel", "rmsnorm_warp_reduce_kernel"],
+      ["规约", "1 次 block_reduce_sum"],
+      ["边界", "if (row >= rows)"],
+      ["输出", "x * inv_rms * gamma"],
+    ],
+  }),
+  makeStep({
+    label: "Layer warp kernel",
+    title: "LayerNorm 调两次 block_reduce_sum",
+    calculation: "mean = reduce(sum) / cols；inv_std = rsqrtf(reduce(var) / cols + eps)",
+    detail: "LayerNorm 的数据流仍然是 mean → variance → affine，只是两次规约都换成了 warp-aware helper。",
+    hostState: "layernorm_warp_reduce",
+    gridState: "row blocks",
+    blockState: "two reductions",
+    pipe: ["block"],
+    concept: 3,
+    source: sourceCatalog.warpLayerKernel,
     thread: "writeLayer",
+    activeCols: allCols,
+    activeGamma: allCols,
+    activeBeta: allCols,
+    output: "layer",
     smem: [fmt(demoLayer.invStd), "", "", "", "", "", "", ""],
     smemActive: [0],
-    activeCols: common.activeCols,
-    activeGamma: common.activeCols,
-    activeBeta: common.activeCols,
+    stats: [
+      ["kernel", "layernorm_warp_reduce_kernel"],
+      ["规约", "2 次 block_reduce_sum"],
+      ["边界", "if (row >= rows)"],
+      ["输出", "norm * gamma + beta"],
+    ],
+  }),
+];
+
+const vectorSteps = [
+  makeStep({
+    label: "对齐判断",
+    title: "float4 快路径要先过 can_vectorize",
+    calculation: "cols % 4 == 0 && is_aligned_16(X/gamma/beta/Y)",
+    detail: "float4 等于 4 个 float，也就是 16 字节。地址不对齐或 cols 不能被 4 整除时，不能安全地按 float4 读写。",
+    hostState: "vectorized wrapper",
+    gridState: "choose path",
+    blockState: "alignment",
+    pipe: ["host"],
+    concept: 4,
+    source: sourceCatalog.align,
+    thread: "vec",
+    activeCols: allCols,
+    smem: ["cols%4", "align X", "align gamma", "align beta/Y", "", "", "", ""],
+    smemActive: [0, 1, 2, 3],
+    stats: [
+      ["cols", `${cols}`],
+      ["vec_cols", `${cols / 4}`],
+      ["float4", "16 bytes"],
+      ["fallback", "warp_reduce"],
+    ],
+  }),
+  makeStep({
+    label: "float4 分组",
+    title: "8 列在动画里变成 2 个 float4",
+    calculation: "vec_cols = cols / 4",
+    detail: "真实数据按连续内存排布。reinterpret_cast 后，X[row, 0..3] 是 X4[0]，X[row, 4..7] 是 X4[1]。",
+    hostState: "vectorized kernel",
+    gridState: "row blocks",
+    blockState: "vec_col",
+    pipe: ["grid", "block"],
+    gridArrow: true,
+    concept: 4,
+    source: sourceCatalog.vectorRms,
+    thread: "vec",
+    activeCols: allCols,
+    smem: [`vec0: ${vecGroups[0].map(fmt).join(",")}`, `vec1: ${vecGroups[1].map(fmt).join(",")}`, "", "", "", "", "", ""],
+    smemActive: [0, 1],
+    stats: [
+      ["vec0", "cols 0..3"],
+      ["vec1", "cols 4..7"],
+      ["读取", "float4 x"],
+      ["线程分工", "vec_col += blockDim.x"],
+    ],
+  }),
+  makeStep({
+    label: "RMS float4",
+    title: "RMSNorm 一次累加 4 个平方",
+    calculation: "sum_sq += x.x² + x.y² + x.z² + x.w²",
+    detail: "这和基础版逐元素累加的数学结果一样，但每次加载拿到四个连续元素。",
+    hostState: "rmsnorm_vectorized",
+    gridState: "row blocks",
+    blockState: "float4 sum_sq",
+    pipe: ["block"],
+    concept: 4,
+    source: sourceCatalog.vectorRms,
+    thread: "vecSquare",
+    activeCols: allCols,
+    smem: [vecSquareSums[0], vecSquareSums[1], "", "", "", "", "", ""],
+    smemActive: [0, 1],
+    betaMode: "off",
+    stats: [
+      ["vec0 x²", fmt(vecSquareSums[0])],
+      ["vec1 x²", fmt(vecSquareSums[1])],
+      ["reduce", "block_reduce_sum"],
+      ["inv_rms", fmt(demoRms.invRms)],
+    ],
+  }),
+  makeStep({
+    label: "RMS float4 写回",
+    title: "Y4[vec_col] 一次写 4 个输出",
+    calculation: "y.x/y.y/y.z/y.w = x.* * inv_rms * g.*",
+    detail: "gamma 也 reinterpret 成 float4，所以每个分量都有自己的缩放参数。",
+    hostState: "rmsnorm_vectorized",
+    gridState: "row blocks",
+    blockState: "Y4 store",
+    pipe: ["block"],
+    concept: 4,
+    source: sourceCatalog.vectorRms,
+    thread: "writeRmsVec",
+    activeCols: allCols,
+    activeGamma: allCols,
+    output: "rms",
+    betaMode: "off",
+    smem: [fmt(demoRms.invRms), "", "", "", "", "", "", ""],
+    smemActive: [0],
+    stats: [
+      ["X", "float4"],
+      ["gamma", "float4"],
+      ["Y", "float4"],
+      ["输出", "4 cols / store"],
+    ],
+  }),
+  makeStep({
+    label: "Layer float4",
+    title: "LayerNorm 的 float4 也要先求 mean",
+    calculation: "local_sum += x.x + x.y + x.z + x.w",
+    detail: "LayerNorm vectorized 版只是把每轮读取从单个 float 变成 float4；mean 和 variance 的顺序不变。",
+    hostState: "layernorm_vectorized",
+    gridState: "row blocks",
+    blockState: "float4 sum",
+    pipe: ["block"],
+    concept: 4,
+    source: sourceCatalog.vectorLayer,
+    thread: "vecSum",
+    activeCols: allCols,
+    smem: [vecSums[0], vecSums[1], "", "", "", "", "", ""],
+    smemActive: [0, 1],
+    stats: [
+      ["vec0 sum", fmt(vecSums[0])],
+      ["vec1 sum", fmt(vecSums[1])],
+      ["mean", fmt(demoLayer.rowMean)],
+      ["reduce", "block_reduce_sum"],
+    ],
+  }),
+  makeStep({
+    label: "Layer variance",
+    title: "四个分量分别减 mean 后求平方",
+    calculation: "local_var += v0² + v1² + v2² + v3²",
+    detail: "float4 不改变 LayerNorm 的数学，只让连续列的加载和写回更粗粒度。",
+    hostState: "layernorm_vectorized",
+    gridState: "row blocks",
+    blockState: "float4 var",
+    pipe: ["block"],
+    concept: 4,
+    source: sourceCatalog.vectorLayer,
+    thread: "vecVar",
+    activeCols: allCols,
+    smem: [vecVarSums[0], vecVarSums[1], "", "", "", "", "", ""],
+    smemActive: [0, 1],
+    stats: [
+      ["vec0 var sum", fmt(vecVarSums[0])],
+      ["vec1 var sum", fmt(vecVarSums[1])],
+      ["inv_std", fmt(demoLayer.invStd)],
+      ["reduce", "block_reduce_sum"],
+    ],
+  }),
+  makeStep({
+    label: "Layer float4 写回",
+    title: "X/Gamma/Beta/Y 都按 float4 读写",
+    calculation: "Y4 = (X4 - mean) * inv_std * G4 + B4",
+    detail: "这是当前 norm.cu 里最复杂的一层：有 wrapper 条件选择、warp 规约 helper，还有 float4 读写。",
+    hostState: "layernorm_vectorized",
+    gridState: "row blocks",
+    blockState: "Y4 store",
+    pipe: ["block"],
+    concept: 4,
+    source: sourceCatalog.vectorLayer,
+    thread: "writeLayerVec",
+    activeCols: allCols,
+    activeGamma: allCols,
+    activeBeta: allCols,
     output: "layer",
-    showAllOutput: true,
-  },
+    smem: [fmt(demoLayer.invStd), "", "", "", "", "", "", ""],
+    smemActive: [0],
+    stats: [
+      ["X", "float4"],
+      ["gamma/beta", "float4"],
+      ["fallback", "warp_reduce"],
+      ["难度", "最高"],
+    ],
+  }),
 ];
 
 const modeConfig = {
   launcher: {
-    title: "Host Launcher：检查输入并启动 kernel",
-    summary: "先从 C++ 包装函数开始：检查 tensor、分配输出，然后用 rows 个 block 启动 GPU 代码。",
+    title: "Host Launcher：从 Python API 到 kernel 选择",
+    summary: "先看最容易的外层：Python 调用进入 C++，检查 tensor，分配输出，再选择基础版、warp-reduce 版或 float4 版。",
     stats: {
-      function: "layernorm_row / rmsnorm_row",
-      unit: "CPU host wrapper",
-      action: "检查 + launch",
-      formula: "<<<rows, 256, smem>>>",
+      function: "layernorm_* / rmsnorm_*",
+      unit: "Python API → C++ launcher",
+      action: "检查 + launch / fallback",
+      formula: "row / warp / vectorized",
     },
     steps: launcherSteps,
   },
-  rmsnorm: {
-    title: "RMSNorm：一次 reduction 得到缩放系数",
-    summary: "一个 CUDA block 处理一行，只统计 mean(x²)，再把每列乘上 gamma[col]。",
+  row: {
+    title: "Row Kernel：基础 shared-memory 规约",
+    summary: "一个 block 处理一行。RMSNorm 做一次平方和规约，LayerNorm 做 mean 和 variance 两次规约。",
     stats: {
-      function: "rmsnorm_row_kernel",
+      function: "rmsnorm_row_kernel / layernorm_row_kernel",
       unit: "1 block / row",
-      action: "一次 reduction",
-      formula: "x * inv_rms * gamma",
+      action: "smem[tid] + stride",
+      formula: "RMS 1 次 / Layer 2 次",
     },
-    steps: rmsSteps,
+    steps: rowSteps,
   },
-  layernorm: {
-    title: "LayerNorm：mean + variance + affine",
-    summary: "一个 CUDA block 处理一行，block 内线程先求 mean，再求 variance，最后写回归一化结果。",
+  warp: {
+    title: "Warp Reduce：把规约抽成 shuffle helper",
+    summary: "数学流程不变，规约方式升级：warp 内用 __shfl_down_sync，block 内只保存每个 warp 的局部结果。",
     stats: {
-      function: "layernorm_row_kernel",
-      unit: "1 block / row",
-      action: "两次 reduction",
-      formula: "norm * gamma + beta",
+      function: "warp_reduce_sum / block_reduce_sum",
+      unit: "warp → block",
+      action: "shuffle + smem 汇总",
+      formula: "return smem[0]",
     },
-    steps: layerSteps,
+    steps: warpSteps,
+  },
+  vectorized: {
+    title: "Float4 Vectorized：4 个连续 float 一组处理",
+    summary: "在 cols 可被 4 整除且地址 16 字节对齐时，vectorized kernel 用 float4 加粗读取和写回；否则自动 fallback。",
+    stats: {
+      function: "layernorm_vectorized / rmsnorm_vectorized",
+      unit: "4 cols / vec_col",
+      action: "float4 load/store",
+      formula: "fast path or fallback",
+    },
+    steps: vectorSteps,
   },
 };
 
@@ -683,10 +910,10 @@ const dom = {
   statUnit: document.querySelector("#stat-unit"),
   statAction: document.querySelector("#stat-action"),
   statFormula: document.querySelector("#stat-formula"),
-  modeTabs: [...document.querySelectorAll(".mode-tab")],
-  comparisonCards: [...document.querySelectorAll("[data-jump-mode]")],
-  conceptItems: [...document.querySelectorAll(".concept-panel li")],
-  pipeNodes: [...document.querySelectorAll(".pipe-node")],
+  modeTabs: Array.from(document.querySelectorAll(".mode-tab")),
+  comparisonCards: Array.from(document.querySelectorAll("[data-jump-mode]")),
+  conceptItems: Array.from(document.querySelectorAll(".concept-panel li")),
+  pipeNodes: Array.from(document.querySelectorAll(".pipe-node")),
   hostArrow: document.querySelector("#host-arrow"),
   gridArrow: document.querySelector("#grid-arrow"),
 };
@@ -703,7 +930,13 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
-function renderCells(container, matrix, step, outputMode = null) {
+function shouldShowOutput(step, rowIndex) {
+  if (!step.output) return false;
+  if (step.showAllOutput) return true;
+  return rowIndex === activeRow;
+}
+
+function renderCells(container, matrix, step, outputMode) {
   const activeCols = new Set(step.activeCols || []);
   const activeRows = new Set(step.activeRow || [activeRow]);
   container.innerHTML = "";
@@ -720,11 +953,9 @@ function renderCells(container, matrix, step, outputMode = null) {
 
       if (outputMode && shouldShowOutput(step, rowIndex)) {
         cell.textContent = fmt(value);
-        if (activeRows.has(rowIndex) || step.showAllOutput) {
-          cell.classList.add("is-written");
-        }
+        cell.classList.add("is-written");
       } else if (outputMode) {
-        cell.textContent = "·";
+        cell.textContent = ".";
         cell.classList.add("is-muted");
       } else {
         cell.textContent = fmt(value);
@@ -733,12 +964,6 @@ function renderCells(container, matrix, step, outputMode = null) {
       container.appendChild(cell);
     });
   });
-}
-
-function shouldShowOutput(step, rowIndex) {
-  if (!step.output) return false;
-  if (step.showAllOutput) return true;
-  return rowIndex === activeRow;
 }
 
 function renderVectors(step) {
@@ -758,7 +983,7 @@ function renderVectors(step) {
   beta.forEach((value, index) => {
     const cell = document.createElement("div");
     cell.className = "cell";
-    if (currentMode === "rmsnorm") {
+    if (step.betaMode === "off") {
       cell.classList.add("is-muted");
       cell.textContent = "off";
     } else {
@@ -771,23 +996,32 @@ function renderVectors(step) {
 
 function laneText(step, index) {
   const x = demoRow[index];
-  if (step.thread === "idle") return "等待 CPU launch";
-  if (step.thread === "row") return `block ${activeRow} 处理 row ${activeRow}`;
-  if (step.thread === "sum") return `X[${activeRow},${index}] = ${fmt(x)}`;
+  const vecId = Math.floor(index / 4);
+  const component = ["x", "y", "z", "w"][index % 4];
+  if (step.thread === "idle") return "等待 wrapper 选择路径";
+  if (step.thread === "row") return `tid ${index} 读取 col ${index}`;
   if (step.thread === "square") return `${fmt(x)}² = ${fmt(demoSquares[index])}`;
-  if (step.thread === "smem") return `smem[${index}] ← ${fmt(step.smem && step.smem[index])}`;
-  if (step.thread === "reduce") return index === 0 ? "smem[0] 收集总和" : "等待 stride 合并";
-  if (step.thread === "inv") return index === 0 ? "计算 inv_rms" : "读取同一缩放系数";
+  if (step.thread === "sum") return `local_sum += ${fmt(x)}`;
   if (step.thread === "variance") return `(x-mean)² = ${fmt(demoCenteredSquares[index])}`;
-  if (step.thread === "normalize") return `norm col ${index}`;
-  if (step.thread === "writeRms") return `Y[${activeRow},${index}] = ${fmt(rmsY[activeRow][index])}`;
-  if (step.thread === "writeLayer") return `Y[${activeRow},${index}] = ${fmt(layerY[activeRow][index])}`;
+  if (step.thread === "reduce") return index === 0 ? "smem[0] 汇总" : "等待 stride 合并";
+  if (step.thread === "writeRms") return `Y = ${fmt(rmsY[activeRow][index])}`;
+  if (step.thread === "writeLayer") return `Y = ${fmt(layerY[activeRow][index])}`;
+  if (step.thread === "shuffle") return `lane ${index} 用 shuffle 交换`;
+  if (step.thread === "warpWrite") return index === 0 ? "lane0 写 smem[warp_id]" : "warp 内先规约";
+  if (step.thread === "warpFinal") return index === 0 ? "thread0 写 smem[0]" : "warp0 汇总";
+  if (step.thread === "fallback") return index < 4 ? "float4 快路径" : "fallback 到 warp";
+  if (step.thread === "vec") return `vec${vecId}.${component}`;
+  if (step.thread === "vecSquare") return `vec${vecId}.${component}²`;
+  if (step.thread === "vecSum") return `vec${vecId}.${component} 加到 sum`;
+  if (step.thread === "vecVar") return `vec${vecId}.${component} 减 mean`;
+  if (step.thread === "writeRmsVec") return `Y4[${vecId}].${component}`;
+  if (step.thread === "writeLayerVec") return `Y4[${vecId}].${component}`;
   return `col ${index}`;
 }
 
 function renderThreads(step) {
-  dom.threadCaption.textContent = currentMode === "launcher"
-    ? "动画用 8 个 lane 预演真实代码中的 256 个线程"
+  dom.threadCaption.textContent = currentMode === "vectorized"
+    ? "动画把 8 列压成 2 个 float4；真实代码仍然是 256 个线程跨步处理 vec_col"
     : "动画用 8 个 lane 表示真实代码中的 256 个线程";
   dom.lanes.innerHTML = "";
 
@@ -795,7 +1029,7 @@ function renderThreads(step) {
     const lane = document.createElement("div");
     lane.className = "thread-lane";
     if (step.thread !== "idle") lane.classList.add("is-active");
-    lane.innerHTML = `<strong>tid ${index}</strong><span>${escapeHtml(laneText(step, index))}</span>`;
+    lane.innerHTML = `<strong>lane ${index}</strong><span>${escapeHtml(laneText(step, index))}</span>`;
     dom.lanes.appendChild(lane);
   }
 }
@@ -809,9 +1043,9 @@ function renderSmem(step) {
     const cell = document.createElement("div");
     cell.className = "smem-cell";
     if (active.has(index)) cell.classList.add("is-active");
-    const value = values[index];
-    cell.innerHTML = `<span>smem[${index}]</span><br><strong>${escapeHtml(fmt(value)) || "empty"}</strong>`;
-    if (!value && value !== 0) cell.classList.add("is-muted");
+    const rawValue = values[index];
+    const display = (rawValue || rawValue === 0) ? fmt(rawValue) : "empty";
+    cell.innerHTML = `<span>smem[${index}]</span><br><strong>${escapeHtml(display)}</strong>`;
     dom.smem.appendChild(cell);
   }
 }
@@ -885,7 +1119,7 @@ function update() {
 
   renderModeStats(config);
   renderPipeline(step);
-  renderCells(dom.matrixX, X, step);
+  renderCells(dom.matrixX, X, step, null);
   renderCells(dom.matrixY, output, step, step.output);
   renderVectors(step);
   renderThreads(step);

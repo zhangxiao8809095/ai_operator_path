@@ -11,6 +11,16 @@ def test_softmax_row():
     assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)
 
 
+def test_softmax_block_reduce():
+    torch.manual_seed(0)
+    for cols in (1024, 1026):
+        x = torch.randn(64, cols, device="cuda", dtype=torch.float32)
+        out = ops.softmax_block_reduce(x.contiguous())
+        ref = torch.softmax(x, dim=-1)
+        torch.cuda.synchronize()
+        assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)
+
+
 def test_softmax_warp_reduce():
     torch.manual_seed(0)
     for cols in (1024, 1026):
@@ -56,6 +66,19 @@ def test_layernorm_warp_reduce():
         assert torch.allclose(out, ref, atol=1e-4, rtol=1e-4)
 
 
+def test_layernorm_block_reduce():
+    torch.manual_seed(0)
+    for cols in (1024, 1026):
+        rows = 64
+        x = torch.randn(rows, cols, device="cuda", dtype=torch.float32)
+        gamma = torch.randn(cols, device="cuda", dtype=torch.float32)
+        beta = torch.randn(cols, device="cuda", dtype=torch.float32)
+        out = ops.layernorm_block_reduce(x.contiguous(), gamma.contiguous(), beta.contiguous(), 1e-5)
+        ref = torch.nn.functional.layer_norm(x, (cols,), gamma, beta, 1e-5)
+        torch.cuda.synchronize()
+        assert torch.allclose(out, ref, atol=1e-4, rtol=1e-4)
+
+
 def test_layernorm_vectorized():
     torch.manual_seed(0)
     for cols in (1024, 1026):
@@ -80,6 +103,18 @@ def test_rmsnorm_row():
     assert torch.allclose(out, ref, atol=1e-4, rtol=1e-4)
 
 
+def test_rmsnorm_block_reduce():
+    torch.manual_seed(0)
+    for cols in (1024, 1026):
+        rows = 64
+        x = torch.randn(rows, cols, device="cuda", dtype=torch.float32)
+        gamma = torch.randn(cols, device="cuda", dtype=torch.float32)
+        out = ops.rmsnorm_block_reduce(x.contiguous(), gamma.contiguous(), 1e-6)
+        ref = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + 1e-6) * gamma
+        torch.cuda.synchronize()
+        assert torch.allclose(out, ref, atol=1e-4, rtol=1e-4)
+
+
 def test_rmsnorm_warp_reduce():
     torch.manual_seed(0)
     for cols in (1024, 1026):
@@ -87,6 +122,18 @@ def test_rmsnorm_warp_reduce():
         x = torch.randn(rows, cols, device="cuda", dtype=torch.float32)
         gamma = torch.randn(cols, device="cuda", dtype=torch.float32)
         out = ops.rmsnorm_warp_reduce(x.contiguous(), gamma.contiguous(), 1e-6)
+        ref = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + 1e-6) * gamma
+        torch.cuda.synchronize()
+        assert torch.allclose(out, ref, atol=1e-4, rtol=1e-4)
+
+
+def test_rmsnorm_vectorized_float4():
+    torch.manual_seed(0)
+    for cols in (1024, 1026):
+        rows = 64
+        x = torch.randn(rows, cols, device="cuda", dtype=torch.float32)
+        gamma = torch.randn(cols, device="cuda", dtype=torch.float32)
+        out = ops.rmsnorm_vectorized_float4(x.contiguous(), gamma.contiguous(), 1e-6)
         ref = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + 1e-6) * gamma
         torch.cuda.synchronize()
         assert torch.allclose(out, ref, atol=1e-4, rtol=1e-4)

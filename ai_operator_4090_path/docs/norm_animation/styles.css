@@ -101,7 +101,7 @@ h1 {
 
 .mode-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  grid-template-columns: repeat(4, minmax(170px, 1fr));
   overflow-x: auto;
   border-bottom: 1px solid var(--line);
   scrollbar-width: thin;
@@ -956,11 +956,11 @@ h1 {
   }
 
   .mode-tabs {
-    grid-template-columns: repeat(3, minmax(176px, 1fr));
+    grid-template-columns: repeat(4, minmax(168px, 1fr));
   }
 
   .mode-tab {
-    min-width: 176px;
+    min-width: 168px;
     padding: 0 10px;
     font-size: 13px;
   }

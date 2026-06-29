@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>attention_naive_kernel 视角：4x3 QKV 到 O</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">attention_naive_kernel 视角</p>
+        <h1>一个 CUDA block 如何算出 O 的一个元素</h1>
+      </div>
+      <div class="kernel-path" aria-label="kernel 工作路径">
+        <span>blockIdx</span>
+        <b>→</b>
+        <span>Q[i]K[j]</span>
+        <b>→</b>
+        <span>max</span>
+        <b>→</b>
+        <span>exp/sum/acc</span>
+        <b>→</b>
+        <span>write O</span>
+      </div>
+    </header>
+
+    <section class="lesson-strip">
+      <div>
+        <span class="section-label">当前步骤</span>
+        <strong id="step-title">Grid 里有 3 × 4 × 3 个 block，每个 block 负责一个 O[h,i,d_out]</strong>
+      </div>
+      <p id="step-summary">为了贴近代码，这里固定 B=1、H=3、S=4、D=3；真实 kernel 里 block 是 128 线程，本动画用 4 个活跃线程分别代表 j=0、1、2、3。</p>
+      <div class="progress-track" aria-label="动画进度">
+        <span id="progress-bar"></span>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <section class="visual-stage">
+        <div class="stage-heading">
+          <div>
+            <span class="section-label" id="phase-label">Kernel launch</span>
+            <h2 id="phase-title">每个 block 认领 O 矩阵里的一个格子</h2>
+          </div>
+          <span class="step-count" id="step-count">01 / 13</span>
+        </div>
+
+        <div class="matrix-overview">
+          <article class="matrix-panel q-panel">
+            <header>
+              <span id="q-head-label">Input · head h=1</span>
+              <strong>Q</strong>
+            </header>
+            <div class="matrix" id="q-matrix" aria-label="Q matrix"></div>
+          </article>
+
+          <article class="matrix-panel k-panel">
+            <header>
+              <span id="k-head-label">Input · head h=1</span>
+              <strong>K</strong>
+            </header>
+            <div class="matrix" id="k-matrix" aria-label="K matrix"></div>
+          </article>
+
+          <article class="matrix-panel v-panel">
+            <header>
+              <span id="v-head-label">Input · head h=1</span>
+              <strong>V</strong>
+            </header>
+            <div class="matrix" id="v-matrix" aria-label="V matrix"></div>
+          </article>
+
+          <article class="matrix-panel o-panel">
+            <header>
+              <span id="o-head-label">Output · head h=1</span>
+              <strong>O</strong>
+            </header>
+            <div class="matrix" id="o-matrix" aria-label="O matrix"></div>
+          </article>
+        </div>
+
+        <div class="head-board">
+          <article class="head-card">
+            <header class="panel-heading">
+              <div>
+                <span>grid.z = B × H</span>
+                <strong>三个 head 是三层独立的 block 平面</strong>
+              </div>
+              <small>B=1, H=3</small>
+            </header>
+            <div class="head-strip" id="head-strip" aria-label="head layers"></div>
+          </article>
+        </div>
+
+        <div class="kernel-board">
+          <article class="block-card">
+            <header class="panel-heading">
+              <div>
+                <span>当前 CUDA block</span>
+                <strong id="block-title">blockIdx = (d_out=1, i=1, bh=1)</strong>
+              </div>
+              <small>只计算一个输出元素</small>
+            </header>
+            <div class="block-mapping">
+              <code id="mapping-code">d_out = blockIdx.x；i = blockIdx.y；bh = blockIdx.z</code>
+              <b id="target-code">target: O[h=1,i=1,d=1]</b>
+            </div>
+          </article>
+
+          <article class="thread-card">
+            <header class="panel-heading">
+              <div>
+                <span>block 内线程分工</span>
+                <strong>for (j = tid; j &lt; S; j += blockDim.x)</strong>
+              </div>
+              <small>toy: 3 active threads</small>
+            </header>
+            <div class="thread-lanes" id="thread-lanes"></div>
+          </article>
+        </div>
+
+        <div class="computation-board">
+          <article class="score-card">
+            <header class="panel-heading">
+              <div>
+                <span>第一遍 / 第二遍都会算</span>
+                <strong>score(j) = Q[i] · K[j] / sqrt(D)</strong>
+              </div>
+              <small id="score-status">等待选择 block</small>
+            </header>
+            <div class="score-row" id="score-row"></div>
+          </article>
+
+          <article class="shared-card">
+            <header class="panel-heading">
+              <div>
+                <span>shared memory 归约</span>
+                <strong id="shared-title">smax / ssum / sacc 复用同一块 smem</strong>
+              </div>
+              <small>对应 smem[]</small>
+            </header>
+            <div class="shared-rows">
+              <div class="shared-row">
+                <span>smax</span>
+                <div id="smax-row"></div>
+              </div>
+              <div class="shared-row">
+                <span>ssum</span>
+                <div id="ssum-row"></div>
+              </div>
+              <div class="shared-row">
+                <span>sacc</span>
+                <div id="sacc-row"></div>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <section class="formula-panel">
+          <div>
+            <span class="section-label">当前代码含义</span>
+            <code id="formula-code">dim3 grid(D, S, B * H)</code>
+          </div>
+          <strong id="formula-result">36 个 block 拼出 3 个 head 的 O</strong>
+        </section>
+      </section>
+
+      <aside class="inspector">
+        <section class="control-panel">
+          <div class="control-row">
+            <button class="icon-button" id="reset-button" type="button" title="重置" aria-label="重置">↺</button>
+            <button class="icon-button" id="prev-button" type="button" title="上一步" aria-label="上一步">‹</button>
+            <button class="play-button" id="play-button" type="button" title="播放" aria-label="播放">
+              <span id="play-icon">▶</span>
+            </button>
+            <button class="icon-button" id="next-button" type="button" title="下一步" aria-label="下一步">›</button>
+          </div>
+          <label class="speed-control">
+            <span>速度</span>
+            <input id="speed-input" type="range" min="400" max="1800" step="50" value="1100">
+            <output id="speed-output">1.0x</output>
+          </label>
+        </section>
+
+        <section class="focus-panel">
+          <h2>视角切换</h2>
+          <ol>
+            <li class="is-current" data-focus="grid">
+              <span>整体 O</span>
+              <small>完整 attention 要填满所有 O 元素</small>
+            </li>
+            <li data-focus="block">
+              <span>一个 block</span>
+              <small>认领一个 O[i,d_out]</small>
+            </li>
+            <li data-focus="thread">
+              <span>一个线程</span>
+              <small>只负责部分 j 的贡献</small>
+            </li>
+            <li data-focus="write">
+              <span>写回</span>
+              <small>tid=0 把结果写入 O</small>
+            </li>
+          </ol>
+        </section>
+
+        <section class="legend-panel">
+          <h2>颜色含义</h2>
+          <dl>
+            <div>
+              <dt><span class="swatch q"></span>Q[i]</dt>
+              <dd>当前 query token</dd>
+            </div>
+            <div>
+              <dt><span class="swatch k"></span>K[j]</dt>
+              <dd>被扫描的 key token</dd>
+            </div>
+            <div>
+              <dt><span class="swatch v"></span>V[j,d]</dt>
+              <dd>当前输出维度的信息</dd>
+            </div>
+            <div>
+              <dt><span class="swatch o"></span>O[i,d]</dt>
+              <dd>当前 block 写回的格子</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="takeaway-panel">
+          <h2>一句话</h2>
+          <p id="takeaway-text">整体 attention 填满 O；一个 block 填一个 O 格子；block 内线程分工扫描所有 j。</p>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>

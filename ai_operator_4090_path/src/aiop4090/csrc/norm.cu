@@ -276,6 +276,10 @@ torch::Tensor layernorm_warp_reduce(torch::Tensor X, torch::Tensor gamma, torch:
     return Y;
 }
 
+torch::Tensor layernorm_block_reduce(torch::Tensor X, torch::Tensor gamma, torch::Tensor beta, double eps) {
+    return layernorm_warp_reduce(X, gamma, beta, eps);
+}
+
 torch::Tensor layernorm_vectorized(torch::Tensor X, torch::Tensor gamma, torch::Tensor beta, double eps) {
     CHECK_INPUT(X);
     CHECK_INPUT(gamma);
@@ -318,6 +322,10 @@ torch::Tensor rmsnorm_warp_reduce(torch::Tensor X, torch::Tensor gamma, double e
     return Y;
 }
 
+torch::Tensor rmsnorm_block_reduce(torch::Tensor X, torch::Tensor gamma, double eps) {
+    return rmsnorm_warp_reduce(X, gamma, eps);
+}
+
 torch::Tensor rmsnorm_vectorized(torch::Tensor X, torch::Tensor gamma, double eps) {
     CHECK_INPUT(X);
     CHECK_INPUT(gamma);
@@ -340,4 +348,8 @@ torch::Tensor rmsnorm_vectorized(torch::Tensor X, torch::Tensor gamma, double ep
             rows, cols, static_cast<float>(eps));
     }
     return Y;
+}
+
+torch::Tensor rmsnorm_vectorized_float4(torch::Tensor X, torch::Tensor gamma, double eps) {
+    return rmsnorm_vectorized(X, gamma, eps);
 }

@@ -25,22 +25,26 @@
         <span class="mode-index">01</span>
         <span>Host Launcher</span>
       </button>
-      <button class="mode-tab" data-mode="rmsnorm" type="button">
+      <button class="mode-tab" data-mode="row" type="button">
         <span class="mode-index">02</span>
-        <span>RMSNorm Kernel</span>
+        <span>Row Kernel</span>
       </button>
-      <button class="mode-tab" data-mode="layernorm" type="button">
+      <button class="mode-tab" data-mode="warp" type="button">
         <span class="mode-index">03</span>
-        <span>LayerNorm Kernel</span>
+        <span>Warp Reduce</span>
+      </button>
+      <button class="mode-tab" data-mode="vectorized" type="button">
+        <span class="mode-index">04</span>
+        <span>Float4 Vectorized</span>
       </button>
     </nav>
 
     <section class="lesson-strip">
       <div>
         <span class="lesson-label">当前视角</span>
-        <strong id="mode-title">Host Launcher：检查输入并启动 kernel</strong>
+        <strong id="mode-title">Host Launcher：从 Python API 到 kernel 选择</strong>
       </div>
-      <p id="mode-summary">先从 C++ 包装函数开始：检查 tensor、分配输出，然后用 rows 个 block 启动 GPU 代码。</p>
+      <p id="mode-summary">先看最容易的外层：Python 调用进入 C++，检查 tensor，分配输出，再选择基础版、warp-reduce 版或 float4 版。</p>
       <div class="progress-track" aria-label="动画进度">
         <span id="progress-bar"></span>
       </div>
@@ -53,7 +57,7 @@
             <span class="stage-kicker" id="phase-label">入口</span>
             <h2 id="phase-title">Python 调用进入 C++ wrapper</h2>
           </div>
-          <span class="step-count" id="step-count">01 / 08</span>
+          <span class="step-count" id="step-count">01 / 06</span>
         </div>
 
         <section class="pipeline">
@@ -173,19 +177,19 @@
           <dl>
             <div>
               <dt>函数</dt>
-              <dd id="stat-function">layernorm_row_kernel</dd>
+              <dd id="stat-function">layernorm_* / rmsnorm_*</dd>
             </div>
             <div>
               <dt>并行单位</dt>
-              <dd id="stat-unit">1 block / row</dd>
+              <dd id="stat-unit">Python API → C++ launcher</dd>
             </div>
             <div>
               <dt>核心动作</dt>
-              <dd id="stat-action">两次 reduction</dd>
+              <dd id="stat-action">检查 + launch / fallback</dd>
             </div>
             <div>
               <dt>输出公式</dt>
-              <dd id="stat-formula">norm * gamma + beta</dd>
+              <dd id="stat-formula">row / warp / vectorized</dd>
             </div>
           </dl>
         </section>
@@ -202,16 +206,16 @@
               <small>tid 跨步扫 cols</small>
             </li>
             <li>
-              <span>Shared Memory</span>
-              <small>保存局部和</small>
+              <span>基础规约</span>
+              <small>smem[tid] 保存局部和</small>
             </li>
             <li>
-              <span>Reduction</span>
-              <small>局部结果合成统计量</small>
+              <span>Warp Reduce</span>
+              <small>shuffle + warp 汇总</small>
             </li>
             <li>
-              <span>Normalize</span>
-              <small>写回 Y</small>
+              <span>Float4 / Fallback</span>
+              <small>4 个 float 一组读写</small>
             </li>
           </ol>
         </section>
@@ -221,26 +225,32 @@
     <section class="comparison-band">
       <header>
         <span class="stage-kicker">函数地图</span>
-        <h2>norm.cu 的函数分成 GPU kernel 和 CPU wrapper 两层</h2>
+        <h2>新版 norm.cu 从基础实现一路加到 warp reduce 和 float4 向量化</h2>
       </header>
       <div class="comparison-grid">
           <article data-jump-mode="launcher">
             <span class="comparison-number">01</span>
-            <h3>layernorm_row / rmsnorm_row</h3>
-            <p>检查输入、创建输出，配置 rows 个 block 和 256 个线程。</p>
-            <strong>&lt;&lt;&lt;rows, 256, smem&gt;&gt;&gt;</strong>
+            <h3>Host launchers</h3>
+            <p>6 个 Python API 进入 C++ wrapper，检查形状、空矩阵和向量化条件。</p>
+            <strong>row / warp_reduce / vectorized</strong>
           </article>
-          <article data-jump-mode="rmsnorm">
+          <article data-jump-mode="row">
             <span class="comparison-number">02</span>
-            <h3>rmsnorm_row_kernel</h3>
-            <p>不减 mean，只用平方均值做缩放。</p>
-            <strong>sum(x²) → scale</strong>
+            <h3>row kernels</h3>
+            <p>基础版用 shared memory 树形规约，RMSNorm 一次，LayerNorm 两次。</p>
+            <strong>smem[tid] + stride</strong>
           </article>
-          <article data-jump-mode="layernorm">
+          <article data-jump-mode="warp">
             <span class="comparison-number">03</span>
-            <h3>layernorm_row_kernel</h3>
-            <p>一个 block 处理一行，先求 mean，再求 variance。</p>
-            <strong>sum → var → affine</strong>
+            <h3>warp reduce kernels</h3>
+            <p>把规约逻辑抽进 block_reduce_sum，warp 内用 shuffle 交换数据。</p>
+            <strong>__shfl_down_sync</strong>
+          </article>
+          <article data-jump-mode="vectorized">
+            <span class="comparison-number">04</span>
+            <h3>vectorized kernels</h3>
+            <p>满足 16 字节对齐且 cols 能被 4 整除时，使用 float4 批量读写。</p>
+            <strong>float4 + fallback</strong>
           </article>
       </div>
     </section>

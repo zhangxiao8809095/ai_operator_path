@@ -50,15 +50,19 @@ def bench_softmax_norm():
         cases = [
             ("torch_softmax", lambda: torch.softmax(x, dim=-1)),
             ("softmax_row", lambda: ops.softmax_row(x)),
+            ("softmax_block_reduce", lambda: ops.softmax_block_reduce(x)),
             ("softmax_warp_reduce", lambda: ops.softmax_warp_reduce(x)),
             ("softmax_online", lambda: ops.softmax_online(x)),
             ("torch_layernorm", lambda: torch.nn.functional.layer_norm(x, (cols,), gamma, beta)),
             ("layernorm_row", lambda: ops.layernorm_row(x, gamma, beta)),
+            ("layernorm_block_reduce", lambda: ops.layernorm_block_reduce(x, gamma, beta)),
             ("layernorm_warp_reduce", lambda: ops.layernorm_warp_reduce(x, gamma, beta)),
             ("layernorm_vectorized", lambda: ops.layernorm_vectorized(x, gamma, beta)),
             ("rmsnorm_row", lambda: ops.rmsnorm_row(x, gamma)),
+            ("rmsnorm_block_reduce", lambda: ops.rmsnorm_block_reduce(x, gamma)),
             ("rmsnorm_warp_reduce", lambda: ops.rmsnorm_warp_reduce(x, gamma)),
             ("rmsnorm_vectorized", lambda: ops.rmsnorm_vectorized(x, gamma)),
+            ("rmsnorm_vectorized_float4", lambda: ops.rmsnorm_vectorized_float4(x, gamma)),
         ]
         for name, fn in cases:
             ms = cuda_bench(fn, warmup=10, repeat=50)
@@ -75,10 +79,24 @@ def bench_attention():
         cases = [
             ("torch_sdp_math", lambda: torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)),
             ("attention_naive", lambda: ops.attention_naive(q, k, v, True)),
+            ("attention_causal_naive", lambda: ops.attention_causal_naive(q, k, v)),
+            ("attention_tiled_online", lambda: ops.attention_tiled_online_softmax(q, k, v, True)),
         ]
         for name, fn in cases:
             ms = cuda_bench(fn, warmup=5, repeat=20)
             print(f"shape=({b},{h},{s},{d}) {name:16s}: {ms:8.3f} ms")
+
+    print("\n[Attention KV-cache decode] ms/op")
+    for b, h, cache_s, d in [(1, 8, 128, 64), (2, 8, 256, 64)]:
+        q = torch.randn(b, h, 1, d, device="cuda")
+        k_cache = torch.randn(b, h, cache_s, d, device="cuda")
+        v_cache = torch.randn_like(k_cache)
+        cases = [
+            ("kv_cache_decode", lambda: ops.attention_kv_cache_decode(q, k_cache, v_cache, cache_s)),
+        ]
+        for name, fn in cases:
+            ms = cuda_bench(fn, warmup=5, repeat=20)
+            print(f"shape=({b},{h},1,{d}) cache_s={cache_s} {name:16s}: {ms:8.3f} ms")
 
 
 def main():

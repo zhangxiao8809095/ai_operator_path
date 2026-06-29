@@ -117,6 +117,7 @@ bash scripts/profile_ncu.sh gemm_regtile4x4
 bash scripts/profile_ncu.sh gemm_vectorized_float4
 bash scripts/profile_ncu.sh gemm_wmma_fp16
 bash scripts/profile_ncu.sh softmax
+bash scripts/profile_ncu.sh softmax_block_reduce
 bash scripts/profile_ncu.sh softmax_warp_reduce
 bash scripts/profile_ncu.sh softmax_online
 bash scripts/profile_ncu.sh layernorm
@@ -167,6 +168,7 @@ docs/phase_map.md
 文件：`src/aiop4090/csrc/softmax.cu`
 
 - `softmax_row`
+- `softmax_block_reduce`
 - `softmax_warp_reduce`
 - `softmax_online`
 

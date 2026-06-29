@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Softmax 动画：从 wrapper 到 block 内归约</title>
+  <title>Softmax 动画：从基础版到 Warp Reduce / Online</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -11,14 +11,16 @@
     <header class="topbar">
       <div>
         <p class="eyebrow">CUDA Softmax 学习实验</p>
-        <h1>从一行概率到 block 内归约</h1>
+        <h1>从一行概率到 Warp Reduce / Online Softmax</h1>
       </div>
       <div class="formula" aria-label="softmax 公式">
         <span>X[rows, cols]</span>
         <strong>→</strong>
-        <span>exp(x - max) / sum</span>
+        <span>shared tree</span>
         <strong>→</strong>
-        <span>Y</span>
+        <span>warp reduce</span>
+        <strong>→</strong>
+        <span>online state</span>
       </div>
     </header>
 
@@ -29,18 +31,26 @@
       </button>
       <button class="mode-tab" data-jump="1" type="button">
         <span class="mode-index">02</span>
-        <span>softmax_row</span>
+        <span>入口</span>
       </button>
       <button class="mode-tab" data-jump="3" type="button">
         <span class="mode-index">03</span>
-        <span>线程分工</span>
+        <span>基础版</span>
       </button>
       <button class="mode-tab" data-jump="5" type="button">
         <span class="mode-index">04</span>
-        <span>Reduction</span>
+        <span>Shared Tree</span>
       </button>
-      <button class="mode-tab" data-jump="8" type="button">
+      <button class="mode-tab" data-jump="7" type="button">
         <span class="mode-index">05</span>
+        <span>Warp Reduce</span>
+      </button>
+      <button class="mode-tab" data-jump="10" type="button">
+        <span class="mode-index">06</span>
+        <span>Online</span>
+      </button>
+      <button class="mode-tab" data-jump="12" type="button">
+        <span class="mode-index">07</span>
         <span>写回</span>
       </button>
     </nav>
@@ -63,7 +73,7 @@
             <span class="stage-kicker" id="phase-label">入口</span>
             <h2 id="phase-title">X 的每一行单独做 softmax</h2>
           </div>
-          <span class="step-count" id="step-count">01 / 09</span>
+          <span class="step-count" id="step-count">01 / 13</span>
         </div>
 
         <section class="pipeline">
@@ -120,7 +130,7 @@
           <article class="memory-zone">
             <div class="zone-title">
               <span class="zone-dot"></span>
-              Shared Memory smem[tid]
+              Shared Memory / Warp Scratch
             </div>
             <div class="smem-grid" id="smem-grid" aria-label="shared memory"></div>
           </article>
@@ -128,7 +138,7 @@
           <article class="reduction-zone">
             <div class="zone-title">
               <span class="zone-dot reduction-dot"></span>
-              Block 内归约路径
+              当前归约路径
             </div>
             <div class="reduction-track" id="reduction-track" aria-label="reduction 步骤"></div>
           </article>
@@ -224,6 +234,18 @@
             <li>
               <span>两次归约</span>
               <small>max 再 sum</small>
+            </li>
+            <li>
+              <span>Warp Shuffle</span>
+              <small>lane 内交换数据</small>
+            </li>
+            <li>
+              <span>Block Reduce</span>
+              <small>warp 结果进 smem</small>
+            </li>
+            <li>
+              <span>Online State</span>
+              <small>(max_val, sum_val)</small>
             </li>
             <li>
               <span>写回 Y</span>

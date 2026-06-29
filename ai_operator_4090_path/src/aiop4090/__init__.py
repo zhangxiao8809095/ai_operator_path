@@ -36,6 +36,10 @@ def softmax_row(x):
     return _C.softmax_row(x)
 
 
+def softmax_block_reduce(x):
+    return _C.softmax_block_reduce(x)
+
+
 def softmax_warp_reduce(x):
     return _C.softmax_warp_reduce(x)
 
@@ -46,6 +50,10 @@ def softmax_online(x):
 
 def layernorm_row(x, gamma, beta, eps=1e-5):
     return _C.layernorm_row(x, gamma, beta, float(eps))
+
+
+def layernorm_block_reduce(x, gamma, beta, eps=1e-5):
+    return _C.layernorm_block_reduce(x, gamma, beta, float(eps))
 
 
 def layernorm_warp_reduce(x, gamma, beta, eps=1e-5):
@@ -60,6 +68,10 @@ def rmsnorm_row(x, gamma, eps=1e-6):
     return _C.rmsnorm_row(x, gamma, float(eps))
 
 
+def rmsnorm_block_reduce(x, gamma, eps=1e-6):
+    return _C.rmsnorm_block_reduce(x, gamma, float(eps))
+
+
 def rmsnorm_warp_reduce(x, gamma, eps=1e-6):
     return _C.rmsnorm_warp_reduce(x, gamma, float(eps))
 
@@ -68,5 +80,23 @@ def rmsnorm_vectorized(x, gamma, eps=1e-6):
     return _C.rmsnorm_vectorized(x, gamma, float(eps))
 
 
+def rmsnorm_vectorized_float4(x, gamma, eps=1e-6):
+    return _C.rmsnorm_vectorized_float4(x, gamma, float(eps))
+
+
 def attention_naive(q, k, v, causal=True):
     return _C.attention_naive(q, k, v, bool(causal))
+
+
+def attention_causal_naive(q, k, v):
+    return _C.attention_causal_naive(q, k, v)
+
+
+def attention_kv_cache_decode(q, k_cache, v_cache, kv_len=None):
+    if kv_len is None:
+        kv_len = k_cache.shape[-2]
+    return _C.attention_kv_cache_decode(q, k_cache, v_cache, int(kv_len))
+
+
+def attention_tiled_online_softmax(q, k, v, causal=True):
+    return _C.attention_tiled_online_softmax(q, k, v, bool(causal))

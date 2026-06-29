@@ -102,9 +102,9 @@ __forceinline__ __device__ OnlineSoftmaxState block_reduce_online(OnlineSoftmaxS
     return {smem_max[0], smem_sum[0]};
 }
 
-__global__ void softmax_row_kernel(const float* __restrict__ X,
-                                   float* __restrict__ Y,
-                                   int rows, int cols) {
+__global__ void softmax_block_reduce_kernel(const float* __restrict__ X,
+                                            float* __restrict__ Y,
+                                            int rows, int cols) {
     extern __shared__ float smem[];
     float* smax = smem;
     float* ssum = smem;
@@ -201,8 +201,22 @@ torch::Tensor softmax_row(torch::Tensor X) {
     int rows = static_cast<int>(X.size(0));
     int cols = static_cast<int>(X.size(1));
     auto Y = torch::empty_like(X);
+    if (rows == 0 || cols == 0) return Y;
     int block = 256;
-    softmax_row_kernel<<<rows, block, block * sizeof(float)>>>(
+    softmax_block_reduce_kernel<<<rows, block, block * sizeof(float)>>>(
+        X.data_ptr<float>(), Y.data_ptr<float>(), rows, cols);
+    return Y;
+}
+
+torch::Tensor softmax_block_reduce(torch::Tensor X) {
+    CHECK_INPUT(X);
+    TORCH_CHECK(X.dim() == 2, "X must be 2D [rows, cols]");
+    int rows = static_cast<int>(X.size(0));
+    int cols = static_cast<int>(X.size(1));
+    auto Y = torch::empty_like(X);
+    if (rows == 0 || cols == 0) return Y;
+    int block = 256;
+    softmax_block_reduce_kernel<<<rows, block, block * sizeof(float)>>>(
         X.data_ptr<float>(), Y.data_ptr<float>(), rows, cols);
     return Y;
 }
