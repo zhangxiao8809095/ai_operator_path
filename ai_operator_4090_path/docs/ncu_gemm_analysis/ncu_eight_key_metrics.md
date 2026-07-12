@@ -11,6 +11,10 @@
 7. Registers / Thread
 8. Top Stall Reason
 
+所有 Warp Stall 的定义、联动指标和解决思路见：[NCU Warp Stall 原因与解决思路](ncu_warp_stall_reasons.md)。
+
+从 GEMM 版本演进学习指标并迁移到陌生 kernel 的完整流程见：[NCU 从 GEMM 演进到陌生算子的分析工作流](ncu_unknown_kernel_analysis_workflow.md)。
+
 目标不是看到一个百分比就立刻下结论，而是建立下面这条分析链：
 
 ```text
