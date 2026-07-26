@@ -10,15 +10,15 @@
 
 ## 代码变化
 
-| 对比项                       | `gemm_regtile2x2`       | `gemm_regtile4x4`       |
-| ---------------------------- | ----------------------- | ----------------------- |
-| 每线程输出                   | 2x2，共 4 个            | 4x4，共 16 个           |
-| 累加器                       | 4 个标量                | `acc[4][4]`，共 16 个   |
-| 每个 block 的输出 tile       | 32x32                   | 64x64                   |
-| block                        | 16x16，共 256 threads   | 16x16，共 256 threads   |
-| A/B shared memory            | `[32][16]` + `[16][32]` | `[64][16]` + `[16][64]` |
-| Shared Memory / Block        | 4096 B                  | 8192 B                  |
-| 每个 `kk` 的 shared load/FMA | 4 个 load / 4 个 FMA    | 8 个 load / 16 个 FMA   |
+| 对比项                        	| `gemm_regtile2x2`            	| `gemm_regtile4x4`            	|
+| ---                          	| ---                          	| ---                          	|
+| 每线程输出                     	| 2x2，共 4 个                  	| 4x4，共 16 个                 	|
+| 累加器                        	| 4 个标量                      	| `acc[4][4]`，共 16 个         	|
+| 每个 block 的输出 tile         	| 32x32                        	| 64x64                        	|
+| block                        	| 16x16，共 256 threads         	| 16x16，共 256 threads         	|
+| A/B shared memory            	| `[32][16]` + `[16][32]`      	| `[64][16]` + `[16][64]`      	|
+| Shared Memory / Block        	| 4096 B                       	| 8192 B                       	|
+| 每个 `kk` 的 shared load/FMA  	| 4 个 load / 4 个 FMA          	| 8 个 load / 16 个 FMA         	|
 
 对照源码：[gemm.cu](../../src/aiop4090/csrc/gemm.cu)
 
@@ -42,16 +42,16 @@ H2：寄存器、shared memory 或依赖代价占主导，occupancy/spill 使性
 
 分别选择第 6 次稳定执行的 `gemm_regtile2x2_kernel` 和 `gemm_regtile4x4_kernel`。
 
-| 指标                    | NCU `Details` 中的位置                     | `gemm_regtile2x2` | `gemm_regtile4x4` | 首轮观察问题                           |
-| ----------------------- | ------------------------------------------ | ----------------- | ----------------- | -------------------------------------- |
-| Time / Duration         | 页面顶部或 `GPU Speed Of Light Throughput` | 待填写            | 待填写            | 4x4 register tile 是否更快             |
-| Compute (SM) Throughput | `GPU Speed Of Light Throughput`            | 待填写            | 待填写            | 更多 ILP 是否提高计算路径利用          |
-| Memory Throughput       | `GPU Speed Of Light Throughput`            | 待填写            | 待填写            | shared/MIO 压力是否继续下降            |
-| DRAM Throughput         | `GPU Speed Of Light Throughput`            | 待填写            | 待填写            | 是否出现额外片外流量                   |
-| L2 Cache Throughput     | `GPU Speed Of Light Throughput`            | 待填写            | 待填写            | cache 路径是否变化                     |
-| Achieved Occupancy      | `Occupancy`                                | 待填写            | 待填写            | 资源增加是否显著减少 active warps      |
-| Registers / Thread      | `Launch Statistics`                        | 待填写            | 待填写            | 16 个累加器带来多少寄存器代价          |
-| Top Stall Reason        | `Warp State Statistics`                    | 待填写            | 待填写            | MIO 是否下降，Scoreboard/Wait 是否上升 |
+| 指标                          	| NCU `Details` 中的位置                         	| `gemm_regtile2x2`    	| `gemm_regtile4x4`    	| 首轮观察问题                           	|
+| ---                          	| ---                                          	| ---                  	| ---                  	| ---                                  	|
+| Time / Duration              	| 页面顶部或 `GPU Speed Of Light Throughput`     	| 1.07 ms                	| 618.91 us                	| 4x4 register tile 是否更快             	|
+| Compute (SM) Throughput      	| `GPU Speed Of Light Throughput`              	| 88.82%                 	| 57.18 %                	| 更多 ILP 是否提高计算路径利用            	|
+| Memory Throughput            	| `GPU Speed Of Light Throughput`              	| 89.32%                 	| 86.28 %                	| shared/MIO 压力是否继续下降             	|
+| DRAM Throughput              	| `GPU Speed Of Light Throughput`              	| 3.31%                	  | 5.82 %                	| 是否出现额外片外流量                     	|
+| L2 Cache Throughput          	| `GPU Speed Of Light Throughput`              	| 44.57%                	| 39.70 %                	| cache 路径是否变化                     	|
+| Achieved Occupancy           	| `Occupancy`                                  	| 93.52%                	| 57.30 %                	| 资源增加是否显著减少 active warps        	|
+| Registers / Thread           	| `Launch Statistics`                          	| 40                    	| 64                	| 16 个累加器带来多少寄存器代价             	|
+| Top Stall Reason             	| `Warp State Statistics`                      	| MIO Throttle：11.0 cycles，41.9%                 	| MIO Throttle（约 3.7 cycles/issued instruction，约占 28%）                	| MIO 是否下降，Scoreboard/Wait 是否上升  	|
 
 Top Stall 请填写：`名称：cycles，比例，Estimated Speedup`。
 
@@ -74,14 +74,14 @@ Top Stall：
 
 ## 补充指标
 
-| 补充指标                      | NCU 位置                       | `regtile2x2` | `regtile4x4` | 用途                           |
-| ----------------------------- | ------------------------------ | ------------ | ------------ | ------------------------------ |
-| Shared Load Instructions      | Memory Tables -> Shared Memory | 待填写       | 待填写       | 验证单位计算的 shared 指令下降 |
-| Shared Load Wavefronts        | Memory Tables -> Shared Memory | 待填写       | 待填写       | 比较 MIO 实际工作量            |
-| Eligible Warps / Scheduler    | Scheduler Statistics           | 待填写       | 待填写       | 判断 latency hiding 是否不足   |
-| Theoretical Occupancy Limiter | Occupancy                      | 待填写       | 待填写       | 确认寄存器还是 shared 限制     |
-| Local Load/Store              | Memory Tables -> Local Memory  | 待填写       | 待填写       | 检查 spill                     |
-| Wait / Scoreboard Stall       | Warp State Statistics          | 待填写       | 待填写       | 检查依赖链是否加重             |
+| 补充指标                               	| NCU 位置                              	| `regtile2x2` 	| `regtile4x4` 	| 用途                          	|
+| ---                                  	| ---                                  	| ---          	| ---          	| ---                          	|
+| Shared Load Instructions             	| Memory Tables -> Shared Memory       	| 待填写        	| 待填写        	| 验证单位计算的 shared 指令下降   	|
+| Shared Load Wavefronts               	| Memory Tables -> Shared Memory       	| 待填写        	| 待填写        	| 比较 MIO 实际工作量             	|
+| Eligible Warps / Scheduler           	| Scheduler Statistics                 	| 待填写        	| 待填写        	| 判断 latency hiding 是否不足   	|
+| Theoretical Occupancy Limiter        	| Occupancy                            	| 待填写        	| 待填写        	| 确认寄存器还是 shared 限制      	|
+| Local Load/Store                     	| Memory Tables -> Local Memory        	| 待填写        	| 待填写        	| 检查 spill                    	|
+| Wait / Scoreboard Stall              	| Warp State Statistics                	| 待填写        	| 待填写        	| 检查依赖链是否加重              	|
 
 ## 4090 执行命令
 

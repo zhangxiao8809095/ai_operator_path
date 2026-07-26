@@ -26,14 +26,14 @@ benchmark 波动范围：
 
 ## 方案差异
 
-| 对比项          | 最佳 FP32 版本           | `gemm_wmma_fp16`              |
-| --------------- | ------------------------ | ----------------------------- |
-| 输入 dtype      | FP32                     | FP16                          |
-| 累加/输出 dtype | FP32                     | FP32                          |
-| 主要计算指令    | 待根据最佳版本/SASS 确认 | WMMA / Tensor Core            |
-| 线程协作        | 待根据最佳版本确认       | 每个 warp 计算一个 16x16 tile |
-| block           | 待填写                   | 32x4，共 128 threads          |
-| 适用 shape      | 一般 FP32 路径           | M/N/K 需满足 16 的 tile 条件  |
+| 对比项                	| 最佳 FP32 版本                 	| `gemm_wmma_fp16`             	|
+| ---                  	| ---                          	| ---                          	|
+| 输入 dtype            	| FP32                         	| FP16                         	|
+| 累加/输出 dtype        	| FP32                         	| FP32                         	|
+| 主要计算指令           	| 待根据最佳版本/SASS 确认        	| WMMA / Tensor Core           	|
+| 线程协作               	| 待根据最佳版本确认              	| 每个 warp 计算一个 16x16 tile  	|
+| block                	| 待填写                        	| 32x4，共 128 threads          	|
+| 适用 shape            	| 一般 FP32 路径                 	| M/N/K 需满足 16 的 tile 条件   	|
 
 固定的 2048 shape 能进入 WMMA 路径。`profile_entry.py` 会向 WMMA 版本传入 FP16 tensor，并获得 FP32 输出。
 
@@ -60,16 +60,16 @@ H2：数据供给、fragment load/store、并行规模或实现效率限制 Tens
 
 分别选择第 6 次稳定执行的最佳 FP32 kernel 和 `gemm_wmma_fp16_kernel`。
 
-| 指标                    | NCU `Details` 中的位置                     | 最佳 FP32（名称待填写） | `gemm_wmma_fp16` | 首轮观察问题                            |
-| ----------------------- | ------------------------------------------ | ----------------------- | ---------------- | --------------------------------------- |
-| Time / Duration         | 页面顶部或 `GPU Speed Of Light Throughput` | 待填写                  | 待填写           | WMMA 完整方案是否稳定更快               |
-| Compute (SM) Throughput | `GPU Speed Of Light Throughput`            | 待填写                  | 待填写           | 高层 SM 繁忙程度如何变化                |
-| Memory Throughput       | `GPU Speed Of Light Throughput`            | 待填写                  | 待填写           | 供数路径是否成为限制                    |
-| DRAM Throughput         | `GPU Speed Of Light Throughput`            | 待填写                  | 待填写           | FP16 是否降低片外流量压力               |
-| L2 Cache Throughput     | `GPU Speed Of Light Throughput`            | 待填写                  | 待填写           | cache 路径是否变化                      |
-| Achieved Occupancy      | `Occupancy`                                | 待填写                  | 待填写           | warp/block 配置如何影响 active warps    |
-| Registers / Thread      | `Launch Statistics`                        | 待填写                  | 待填写           | fragment 带来多少寄存器分配             |
-| Top Stall Reason        | `Warp State Statistics`                    | 待填写                  | 待填写           | Tensor、memory 或 dependency 路径谁主导 |
+| 指标                          	| NCU `Details` 中的位置                         	| 最佳 FP32（名称待填写）         	| `gemm_wmma_fp16`     	| 首轮观察问题                                   	|
+| ---                          	| ---                                          	| ---                          	| ---                  	| ---                                          	|
+| Time / Duration              	| 页面顶部或 `GPU Speed Of Light Throughput`     	| 618.91 us                         	| 816.16 us                	| WMMA 完整方案是否稳定更快                        	|
+| Compute (SM) Throughput      	| `GPU Speed Of Light Throughput`              	| 57.18 %                        	| 21.68 %                	| 高层 SM 繁忙程度如何变化                         	|
+| Memory Throughput            	| `GPU Speed Of Light Throughput`              	| 86.28 %                        	| 91.35 %                	| 供数路径是否成为限制                             	|
+| DRAM Throughput              	| `GPU Speed Of Light Throughput`              	| 5.82 %                        	| 2.04 %                	| FP16 是否降低片外流量压力                        	|
+| L2 Cache Throughput          	| `GPU Speed Of Light Throughput`              	| 39.70 %                        	| 91.35 %                	| cache 路径是否变化                             	|
+| Achieved Occupancy           	| `Occupancy`                                  	| 57.30 %                        	| 87.73 %                	| warp/block 配置如何影响 active warps           	|
+| Registers / Thread           	| `Launch Statistics`                          	| 64                        	| 40                	| fragment 带来多少寄存器分配                     	|
+| Top Stall Reason             	| `Warp State Statistics`                      	| MIO Throttle（约 3.7 cycles/issued instruction，约占 28%）                        	| Long Scoreboard：53.0 cycles，36.6%，Estimated Speedup 8.15%                	| Tensor、memory 或 dependency 路径谁主导         	|
 
 Top Stall 请填写：`名称：cycles，比例，Estimated Speedup`。
 
@@ -96,15 +96,15 @@ Top Stall：
 
 ## Tensor Core 与 Roofline 补充指标
 
-| 补充指标                    | NCU 位置                       | 最佳 FP32 | `wmma_fp16` | 用途                                |
-| --------------------------- | ------------------------------ | --------- | ----------- | ----------------------------------- |
-| 实际 TFLOP/s                | 由 FLOPs / benchmark time 计算 | 待填写    | 待填写      | 比较最终有效吞吐                    |
-| FP32 Pipeline Utilization   | Compute Workload Analysis      | 待填写    | 待填写      | 确认 FP32 路径压力                  |
-| Tensor Pipeline Utilization | Compute Workload Analysis      | 待填写    | 待填写      | 确认 Tensor Core 是否繁忙           |
-| Arithmetic Intensity        | Roofline                       | 待填写    | 待填写      | 判断 roofline 区域                  |
-| 距离 Compute Roof           | Roofline                       | 待填写    | 待填写      | 判断计算吞吐利用空间                |
-| DRAM / L2 Bytes             | Memory Tables                  | 待填写    | 待填写      | 分离 dtype 与 cache 流量影响        |
-| Eligible Warps / Scheduler  | Scheduler Statistics           | 待填写    | 待填写      | 检查 Tensor 指令是否缺少可发射 warp |
+| 补充指标                       	| NCU 位置                              	| 最佳 FP32     	| `wmma_fp16`  	| 用途                                  	|
+| ---                          	| ---                                  	| ---          	| ---          	| ---                                  	|
+| 实际 TFLOP/s                  	| 由 FLOPs / benchmark time 计算        	| 待填写        	| 待填写        	| 比较最终有效吞吐                        	|
+| FP32 Pipeline Utilization    	| Compute Workload Analysis            	| 待填写        	| 待填写        	| 确认 FP32 路径压力                     	|
+| Tensor Pipeline Utilization  	| Compute Workload Analysis            	| 待填写        	| 待填写        	| 确认 Tensor Core 是否繁忙              	|
+| Arithmetic Intensity         	| Roofline                             	| 待填写        	| 待填写        	| 判断 roofline 区域                     	|
+| 距离 Compute Roof             	| Roofline                             	| 待填写        	| 待填写        	| 判断计算吞吐利用空间                     	|
+| DRAM / L2 Bytes              	| Memory Tables                        	| 待填写        	| 待填写        	| 分离 dtype 与 cache 流量影响            	|
+| Eligible Warps / Scheduler   	| Scheduler Statistics                 	| 待填写        	| 待填写        	| 检查 Tensor 指令是否缺少可发射 warp      	|
 
 ## 4090 执行命令
 

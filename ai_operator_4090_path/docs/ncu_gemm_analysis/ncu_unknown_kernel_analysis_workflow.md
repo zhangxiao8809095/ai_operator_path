@@ -23,11 +23,11 @@
 
 ## 当前学习路线
 
-| 学习阶段        | 主要材料                             | 达成目标                                    |
-| --------------- | ------------------------------------ | ------------------------------------------- |
-| 1. 建立概念     | `gemm_naive` 与 `gemm_tiled`         | 能准确读取八个指标，并解释 LG 到 MIO 的迁移 |
-| 2. 建立因果     | padding、register tile、float4、WMMA | 能先预测指标，并区分单变量与混杂变量        |
-| 3. 去掉上帝视角 | 隐藏 GEMM 版本名或分析其他类型算子   | 能只凭报告提出多个候选，而不是直接猜实现    |
+| 学习阶段               	| 主要材料                               	| 达成目标                                       	|
+| ---                  	| ---                                  	| ---                                          	|
+| 1. 建立概念            	| `gemm_naive` 与 `gemm_tiled`          	| 能准确读取八个指标，并解释 LG 到 MIO 的迁移        	|
+| 2. 建立因果            	| padding、register tile、float4、WMMA  	| 能先预测指标，并区分单变量与混杂变量               	|
+| 3. 去掉上帝视角        	| 隐藏 GEMM 版本名或分析其他类型算子        	| 能只凭报告提出多个候选，而不是直接猜实现            	|
 
 阶段一允许看源码，但每次必须先写预测再看报告。阶段二则反过来，先看报告形成假设，再打开源码。
 
@@ -35,15 +35,15 @@
 
 源码位置：[gemm.cu](../../src/aiop4090/csrc/gemm.cu)。固定使用相同 shape 比较时，版本之间的差异更容易与 NCU 指标对应。
 
-| GEMM 版本                | 相比对照版本的主要变化                               | 最适合学习的指标                                   |
-| ------------------------ | ---------------------------------------------------- | -------------------------------------------------- |
-| `gemm_naive`             | 每线程计算一个输出；K 循环直接读取 A/B global memory | Duration、Memory、L2、DRAM、LG Throttle            |
-| `gemm_tiled`             | A/B tile 搬入 shared memory，在 block 内复用         | Duration、Memory 层级、Top Stall 切换              |
-| `gemm_tiled_padding`     | shared 数组第二维从 16 改为 17                       | Top Stall、bank conflict；八指标之外需看 shared 表 |
-| `gemm_regtile2x2`        | 每线程计算 2x2 输出，增加寄存器累加和数据复用        | Registers、Occupancy、MIO、Duration                |
-| `gemm_regtile4x4`        | 每线程计算 4x4 输出，进一步增加 ILP 和寄存器         | Registers 与 Occupancy 的交换、spill 风险          |
-| `gemm_vectorized_float4` | 每线程计算四列，B 使用对齐 `float4` 读取             | LG Throttle、Registers、指令数量、Duration         |
-| `gemm_wmma_fp16`         | FP16 输入并使用 WMMA/Tensor Core                     | Compute pipeline、Duration、Roofline               |
+| GEMM 版本                     	| 相比对照版本的主要变化                                   	| 最适合学习的指标                                        	|
+| ---                          	| ---                                                  	| ---                                                  	|
+| `gemm_naive`                 	| 每线程计算一个输出；K 循环直接读取 A/B global memory       	| Duration、Memory、L2、DRAM、LG Throttle                	|
+| `gemm_tiled`                 	| A/B tile 搬入 shared memory，在 block 内复用            	| Duration、Memory 层级、Top Stall 切换                  	|
+| `gemm_tiled_padding`         	| shared 数组第二维从 16 改为 17                          	| Top Stall、bank conflict；八指标之外需看 shared 表       	|
+| `gemm_regtile2x2`            	| 每线程计算 2x2 输出，增加寄存器累加和数据复用               	| Registers、Occupancy、MIO、Duration                   	|
+| `gemm_regtile4x4`            	| 每线程计算 4x4 输出，进一步增加 ILP 和寄存器               	| Registers 与 Occupancy 的交换、spill 风险               	|
+| `gemm_vectorized_float4`     	| 每线程计算四列，B 使用对齐 `float4` 读取                  	| LG Throttle、Registers、指令数量、Duration              	|
+| `gemm_wmma_fp16`             	| FP16 输入并使用 WMMA/Tensor Core                       	| Compute pipeline、Duration、Roofline                  	|
 
 这七个版本不能简单理解为从上到下必然越来越快：
 
@@ -54,29 +54,29 @@
 
 ## 八个指标分别用哪组 GEMM 学
 
-| 关键指标                | 首选对照实验                       | 本轮要回答的问题                                        |
-| ----------------------- | ---------------------------------- | ------------------------------------------------------- |
-| Duration                | 六组指定对照                       | 代码改动是否带来稳定且超过波动的加速                    |
-| Compute (SM) Throughput | regtile 版本、WMMA 与 FP32 版本    | 高值来自哪条 pipeline，是否等于有效计算更快             |
-| Memory Throughput       | naive -> tiled                     | 高值由 global、L1/TEX 还是 shared/MIO 驱动              |
-| DRAM Throughput         | naive -> tiled，并补充不同矩阵规模 | global load 多是否真的等于 DRAM 带宽高                  |
-| L2 Throughput           | naive -> tiled                     | shared-memory 复用是否减少 L2 路径压力                  |
-| Achieved Occupancy      | tiled -> regtile2x2 -> regtile4x4  | active warp 减少是否真的造成 eligible warp 不足         |
-| Registers / Thread      | tiled -> regtile2x2 -> regtile4x4  | 寄存器增加换来了什么复用，是否产生 occupancy/spill 代价 |
-| Top Stall Reason        | naive -> tiled -> regtile          | 主要等待如何随 global、shared、register 路径迁移        |
+| 关键指标                       	| 首选对照实验                           	| 本轮要回答的问题                                        	|
+| ---                          	| ---                                  	| ---                                                  	|
+| Duration                     	| 六组指定对照                           	| 代码改动是否带来稳定且超过波动的加速                       	|
+| Compute (SM) Throughput      	| regtile 版本、WMMA 与 FP32 版本        	| 高值来自哪条 pipeline，是否等于有效计算更快                	|
+| Memory Throughput            	| naive -> tiled                       	| 高值由 global、L1/TEX 还是 shared/MIO 驱动              	|
+| DRAM Throughput              	| naive -> tiled，并补充不同矩阵规模       	| global load 多是否真的等于 DRAM 带宽高                   	|
+| L2 Throughput                	| naive -> tiled                       	| shared-memory 复用是否减少 L2 路径压力                   	|
+| Achieved Occupancy           	| tiled -> regtile2x2 -> regtile4x4    	| active warp 减少是否真的造成 eligible warp 不足          	|
+| Registers / Thread           	| tiled -> regtile2x2 -> regtile4x4    	| 寄存器增加换来了什么复用，是否产生 occupancy/spill 代价     	|
+| Top Stall Reason             	| naive -> tiled -> regtile            	| 主要等待如何随 global、shared、register 路径迁移          	|
 
 不要要求每次代码改动都让八个指标明显变化。一轮实验只重点理解 2~4 个指标，其余指标用于检查副作用。
 
 ## 推荐实验顺序
 
-| 轮次 | 对照版本                                                         | 主要学习目标                                                  |
-| ---- | ---------------------------------------------------------------- | ------------------------------------------------------------- |
-| 1    | [naive vs tiled](gemm_naive_vs_tiled.md)                         | global 读取变为 shared 复用后，Memory/L2/Top Stall 如何变化   |
-| 2    | [tiled vs tiled_padding](gemm_tiled_vs_tiled_padding.md)         | 如何验证 bank conflict，而不是看到 padding 就预设有效         |
-| 3    | [tiled vs regtile2x2](gemm_tiled_vs_regtile2x2.md)               | shared 访问减少与寄存器增加之间的交换                         |
-| 4    | [regtile2x2 vs regtile4x4](gemm_regtile2x2_vs_regtile4x4.md)     | ILP、Registers、Occupancy 和 spill 的平衡                     |
-| 5    | [naive vs vectorized_float4](gemm_naive_vs_vectorized_float4.md) | 宽访问和每线程多输出如何影响 LG 指令压力                      |
-| 6    | [最佳 FP32 版本 vs wmma_fp16](gemm_best_fp32_vs_wmma_fp16.md)    | 识别 Tensor pipeline 和 Roofline；同时记录 dtype 这一混杂变量 |
+| 轮次  	| 对照版本                                                               	| 主要学习目标                                                   	|
+| ---  	| ---                                                                  	| ---                                                          	|
+| 1    	| [naive vs tiled](gemm_naive_vs_tiled.md)                             	| global 读取变为 shared 复用后，Memory/L2/Top Stall 如何变化      	|
+| 2    	| [tiled vs tiled_padding](gemm_tiled_vs_tiled_padding.md)             	| 如何验证 bank conflict，而不是看到 padding 就预设有效             	|
+| 3    	| [tiled vs regtile2x2](gemm_tiled_vs_regtile2x2.md)                   	| shared 访问减少与寄存器增加之间的交换                             	|
+| 4    	| [regtile2x2 vs regtile4x4](gemm_regtile2x2_vs_regtile4x4.md)         	| ILP、Registers、Occupancy 和 spill 的平衡                      	|
+| 5    	| [naive vs vectorized_float4](gemm_naive_vs_vectorized_float4.md)     	| 宽访问和每线程多输出如何影响 LG 指令压力                           	|
+| 6    	| [最佳 FP32 版本 vs wmma_fp16](gemm_best_fp32_vs_wmma_fp16.md)          	| 识别 Tensor pipeline 和 Roofline；同时记录 dtype 这一混杂变量     	|
 
 ### 第 1 轮：naive vs tiled
 
@@ -215,12 +215,12 @@ Scheduler / Compute pipeline / Memory table / Source-SASS：
 
 实际分析应区分四个证据等级：
 
-| 等级     | 当前能说什么                             | 示例                                       |
-| -------- | ---------------------------------------- | ------------------------------------------ |
-| L0：观察 | 只描述报告中的客观数值                   | DRAM Throughput 是 1.3%                    |
-| L1：候选 | 根据多个指标提出可能方向                 | 可能不是 DRAM 带宽受限                     |
-| L2：定位 | 补充指标和 Source/SASS 指向具体硬件路径  | shared 指令多且 MIO 队列繁忙               |
-| L3：因果 | 单变量改动使目标指标和 Duration 同时改善 | 减少 shared load 后 MIO stall 和时间都下降 |
+| 等级          	| 当前能说什么                           	| 示例                                          	|
+| ---          	| ---                                  	| ---                                          	|
+| L0：观察      	| 只描述报告中的客观数值                   	| DRAM Throughput 是 1.3%                       	|
+| L1：候选      	| 根据多个指标提出可能方向                 	| 可能不是 DRAM 带宽受限                          	|
+| L2：定位      	| 补充指标和 Source/SASS 指向具体硬件路径   	| shared 指令多且 MIO 队列繁忙                    	|
+| L3：因果      	| 单变量改动使目标指标和 Duration 同时改善  	| 减少 shared load 后 MIO stall 和时间都下降      	|
 
 在到达 L2 之前，尽量使用“候选”“怀疑”“需要检查”，不要直接写“该 kernel 是某某 bound”。真正可信的优化结论应达到 L3。
 
@@ -252,16 +252,16 @@ NCU 会多 pass 重放 kernel，不能把一次 NCU Duration 当作完整的稳�
 
 先记录已有的八个指标，但不立即下最终结论：
 
-| 指标                    | 第一眼回答的问题             | 不能单独证明什么                     |
-| ----------------------- | ---------------------------- | ------------------------------------ |
-| Duration                | kernel 完成工作需要多久      | 不能解释为什么快或慢                 |
-| Compute (SM) Throughput | 是否有某条 SM 路径很繁忙     | 不能证明 FP32/Tensor 已达到峰值      |
-| Memory Throughput       | memory 子系统是否有繁忙路径  | 不能证明 DRAM 已跑满                 |
-| DRAM Throughput         | 显存数据通路是否繁忙         | 低值不能排除 cache、队列或延迟问题   |
-| L2 Throughput           | L2 数据通路是否繁忙          | 不能区分有效流量和低效请求           |
-| Achieved Occupancy      | 实际 active warps 是否充足   | 高值不能证明 eligible warps 充足     |
-| Registers / Thread      | 寄存器分配是否可能限制并行度 | 不能单独证明存在 spill               |
-| Top Stall Reason        | warp 最常处于哪种等待状态    | 不能证明它是唯一瓶颈或可获得同等加速 |
+| 指标                          	| 第一眼回答的问题                	| 不能单独证明什么                        	|
+| ---                          	| ---                          	| ---                                  	|
+| Duration                     	| kernel 完成工作需要多久         	| 不能解释为什么快或慢                     	|
+| Compute (SM) Throughput      	| 是否有某条 SM 路径很繁忙         	| 不能证明 FP32/Tensor 已达到峰值         	|
+| Memory Throughput            	| memory 子系统是否有繁忙路径      	| 不能证明 DRAM 已跑满                    	|
+| DRAM Throughput              	| 显存数据通路是否繁忙             	| 低值不能排除 cache、队列或延迟问题        	|
+| L2 Throughput                	| L2 数据通路是否繁忙             	| 不能区分有效流量和低效请求                	|
+| Achieved Occupancy           	| 实际 active warps 是否充足     	| 高值不能证明 eligible warps 充足        	|
+| Registers / Thread           	| 寄存器分配是否可能限制并行度      	| 不能单独证明存在 spill                  	|
+| Top Stall Reason             	| warp 最常处于哪种等待状态        	| 不能证明它是唯一瓶颈或可获得同等加速       	|
 
 这一步的产出不是 `Compute-Bound` 或 `Memory-Bound`，而是下面几类候选：
 
@@ -289,13 +289,13 @@ No Eligible / Skipped Issue Slots
 Warp Cycles Per Issued Instruction
 ```
 
-| Scheduler 现象               | 初步方向                             | 下一步                             |
-| ---------------------------- | ------------------------------------ | ---------------------------------- |
-| Active 少，Eligible 也少     | grid 太小、occupancy 或资源限制      | 看 Waves Per SM、Launch、Occupancy |
-| Active 多，Eligible 很少     | warp 大量等待依赖、同步或数据返回    | 看 Warp State Statistics           |
-| Eligible 多，Issued 接近上限 | scheduler 有活可发，更像吞吐路径繁忙 | 看 Compute/Memory 各子流水线       |
-| Not Selected 高              | 通常说明 eligible warp 充足          | 不要把它直接当成坏事               |
-| issue slots 经常空闲         | 延迟隐藏失败或并行工作不足           | 结合 Top 2~3 stall 继续定位        |
+| Scheduler 现象                	| 初步方向                               	| 下一步                                	|
+| ---                          	| ---                                  	| ---                                  	|
+| Active 少，Eligible 也少       	| grid 太小、occupancy 或资源限制         	| 看 Waves Per SM、Launch、Occupancy    	|
+| Active 多，Eligible 很少       	| warp 大量等待依赖、同步或数据返回         	| 看 Warp State Statistics              	|
+| Eligible 多，Issued 接近上限   	| scheduler 有活可发，更像吞吐路径繁忙      	| 看 Compute/Memory 各子流水线           	|
+| Not Selected 高               	| 通常说明 eligible warp 充足            	| 不要把它直接当成坏事                     	|
+| issue slots 经常空闲           	| 延迟隐藏失败或并行工作不足                	| 结合 Top 2~3 stall 继续定位            	|
 
 `Achieved Occupancy` 高只说明 active warp 多。只有 `Eligible Warps` 也足够，才能说明这些 warp 真正具备发射条件。
 
@@ -312,22 +312,22 @@ global/local/shared memory 指令
 
 ### 5.1 先看哪一层接近峰值
 
-| 观察组合               | 候选判断                     | 需要补充的证据                        |
-| ---------------------- | ---------------------------- | ------------------------------------- |
-| DRAM 高                | DRAM bandwidth-bound 候选    | Roofline、DRAM bytes、访问效率        |
-| L2 高、DRAM 低         | L2/cache 数据通路候选        | L2 sectors、hit rate、请求效率        |
-| L1/TEX 高、L2/DRAM 低  | 片上 L1/TEX 或指令路径候选   | L1 requests、LG/TEX stall             |
-| Shared/MIO 高、DRAM 低 | shared-memory/MIO 候选       | shared 指令、wavefront、bank conflict |
-| 各层 throughput 都低   | 更像延迟、同步或工作规模不足 | Scheduler、Scoreboard、Waves Per SM   |
+| 观察组合                       	| 候选判断                       	| 需要补充的证据                          	|
+| ---                          	| ---                          	| ---                                  	|
+| DRAM 高                       	| DRAM bandwidth-bound 候选     	| Roofline、DRAM bytes、访问效率         	|
+| L2 高、DRAM 低                	| L2/cache 数据通路候选          	| L2 sectors、hit rate、请求效率         	|
+| L1/TEX 高、L2/DRAM 低         	| 片上 L1/TEX 或指令路径候选      	| L1 requests、LG/TEX stall             	|
+| Shared/MIO 高、DRAM 低        	| shared-memory/MIO 候选        	| shared 指令、wavefront、bank conflict  	|
+| 各层 throughput 都低           	| 更像延迟、同步或工作规模不足      	| Scheduler、Scoreboard、Waves Per SM   	|
 
 ### 5.2 再区分“队列满”和“数据没回来”
 
-| Stall 组合       | 它真正表示什么                    | 优先实验                                 |
-| ---------------- | --------------------------------- | ---------------------------------------- |
-| LG Throttle      | global/local memory 指令队列满    | 减少指令数、数据复用、宽访问、检查 spill |
-| Long Scoreboard  | L1TEX 操作的数据依赖尚未完成      | 合并访问、局部性、预取、ILP              |
-| MIO Throttle     | shared/MIO 等指令队列满           | 减少 shared 指令、register tiling        |
-| Short Scoreboard | shared/MIO 操作的数据依赖尚未完成 | bank conflict、寄存器复用、指令重排      |
+| Stall 组合            	| 它真正表示什么                          	| 优先实验                               	|
+| ---                  	| ---                                  	| ---                                  	|
+| LG Throttle          	| global/local memory 指令队列满         	| 减少指令数、数据复用、宽访问、检查 spill   	|
+| Long Scoreboard      	| L1TEX 操作的数据依赖尚未完成             	| 合并访问、局部性、预取、ILP              	|
+| MIO Throttle         	| shared/MIO 等指令队列满                	| 减少 shared 指令、register tiling      	|
+| Short Scoreboard     	| shared/MIO 操作的数据依赖尚未完成        	| bank conflict、寄存器复用、指令重排      	|
 
 这四项不能互相替代：Throttle 更偏**吞吐和队列容量**，Scoreboard 更偏**已发出操作的结果延迟**。
 
@@ -371,14 +371,14 @@ LSU
 
 这时不能直接叫 `Latency-Bound`，应按顺序排查：
 
-| 排查项       | 典型证据                                 | 可能的下一步                               |
-| ------------ | ---------------------------------------- | ------------------------------------------ |
-| 工作规模不足 | Waves Per SM 低、grid 小、kernel 很短    | batch/fusion、增加并行工作、减少 launch    |
-| 数据依赖延迟 | Eligible 少、Long/Short Scoreboard 高    | 预取、ILP、访问优化、增加可隐藏延迟的 warp |
-| 固定指令延迟 | Wait 高、串行 dependency chain           | 多累加器、合理展开、低延迟指令             |
-| 同步等待     | Barrier/Membar 高                        | 均衡同步前工作、减少不必要同步             |
-| 控制流问题   | Branch Resolving/No Instructions 高      | 简化分支、检查 divergence 和代码体积       |
-| 资源限制     | theoretical occupancy 低、有明确 limiter | block size、寄存器、shared memory 实验     |
+| 排查项        	| 典型证据                                       	| 可能的下一步                                   	|
+| ---          	| ---                                          	| ---                                          	|
+| 工作规模不足   	| Waves Per SM 低、grid 小、kernel 很短          	| batch/fusion、增加并行工作、减少 launch          	|
+| 数据依赖延迟   	| Eligible 少、Long/Short Scoreboard 高         	| 预取、ILP、访问优化、增加可隐藏延迟的 warp         	|
+| 固定指令延迟   	| Wait 高、串行 dependency chain                 	| 多累加器、合理展开、低延迟指令                    	|
+| 同步等待       	| Barrier/Membar 高                             	| 均衡同步前工作、减少不必要同步                    	|
+| 控制流问题     	| Branch Resolving/No Instructions 高           	| 简化分支、检查 divergence 和代码体积             	|
+| 资源限制       	| theoretical occupancy 低、有明确 limiter       	| block size、寄存器、shared memory 实验          	|
 
 ## 八、Occupancy 和 Registers 只用于解释限制
 
@@ -427,17 +427,17 @@ MIO Throttle 高
 
 每次实验只改变一个主要因素，并提前写下预期：
 
-| 当前假设                      | 单变量实验                           | 预期同时变化的证据                                   |
-| ----------------------------- | ------------------------------------ | ---------------------------------------------------- |
-| DRAM 带宽限制                 | 提高数据复用或算术强度               | DRAM bytes/压力下降，Duration 下降                   |
-| global 指令队列限制           | 寄存器/shared 复用或对齐宽访问       | LG 指令数、LG Throttle、Duration 下降                |
-| global 数据延迟               | 合并访问、预取、增加独立累加器       | Long Scoreboard 和 Duration 下降                     |
-| shared 指令吞吐限制           | register tiling，减少 shared load    | shared 指令、MIO Throttle、Duration 下降             |
-| shared bank conflict          | 只改变 shared layout/padding         | excessive wavefront、Short Scoreboard、Duration 下降 |
-| 数学 pipeline 限制            | 改变指令类型、精度或使用 Tensor Core | 目标 pipeline 压力和 Duration 变化                   |
-| Barrier 等待                  | 均衡同步前工作或减少一次同步         | Barrier cycles 和 Duration 下降                      |
-| occupancy/latency hiding 不足 | 只改变 block size 或资源使用         | Eligible Warps、Scoreboard、Duration 改善            |
-| grid 太小                     | 增加独立工作或与相邻操作 fusion      | Waves Per SM/总耗时改善                              |
+| 当前假设                               	| 单变量实验                             	| 预期同时变化的证据                                      	|
+| ---                                  	| ---                                  	| ---                                                  	|
+| DRAM 带宽限制                          	| 提高数据复用或算术强度                   	| DRAM bytes/压力下降，Duration 下降                      	|
+| global 指令队列限制                    	| 寄存器/shared 复用或对齐宽访问           	| LG 指令数、LG Throttle、Duration 下降                   	|
+| global 数据延迟                        	| 合并访问、预取、增加独立累加器            	| Long Scoreboard 和 Duration 下降                      	|
+| shared 指令吞吐限制                    	| register tiling，减少 shared load     	| shared 指令、MIO Throttle、Duration 下降               	|
+| shared bank conflict                 	| 只改变 shared layout/padding          	| excessive wavefront、Short Scoreboard、Duration 下降   	|
+| 数学 pipeline 限制                     	| 改变指令类型、精度或使用 Tensor Core     	| 目标 pipeline 压力和 Duration 变化                      	|
+| Barrier 等待                          	| 均衡同步前工作或减少一次同步              	| Barrier cycles 和 Duration 下降                       	|
+| occupancy/latency hiding 不足         	| 只改变 block size 或资源使用            	| Eligible Warps、Scoreboard、Duration 改善              	|
+| grid 太小                             	| 增加独立工作或与相邻操作 fusion          	| Waves Per SM/总耗时改善                                	|
 
 如果目标 stall 降低但 Duration 没有下降，可能是：
 

@@ -63,16 +63,16 @@ H2：原 tiled 已经基本没有 bank conflict。
 
 在 NCU 中分别选择第 6 次稳定执行的 `gemm_tiled_kernel` 和 `gemm_tiled_padding_kernel`。先填写界面中的原始名称和数值，不急着写结论。
 
-| 指标                    | NCU `Details` 中的位置                     | `gemm_tiled`                     | `gemm_tiled_padding`             | 首轮观察问题                             |
-| ----------------------- | ------------------------------------------ | -------------------------------- | -------------------------------- | ---------------------------------------- |
-| Time / Duration         | 页面顶部或 `GPU Speed Of Light Throughput` | 2.93 ms                          | 4.39 ms                          | padding 是否稳定更快                     |
-| Compute (SM) Throughput | `GPU Speed Of Light Throughput`            | 96.37%                           | 96.80%                           | SM 繁忙程度是否明显变化                  |
-| Memory Throughput       | `GPU Speed Of Light Throughput`            | 96.37%                           | 96.80%                           | memory 汇总压力是否变化                  |
-| DRAM Throughput         | `GPU Speed Of Light Throughput`            | 1.33%                            | 0.95%                            | 变化是否来自片外显存                     |
-| L2 Cache Throughput     | `GPU Speed Of Light Throughput`            | 32.95%                           | 22.01%                           | L2 路径是否基本一致                      |
-| Achieved Occupancy      | `Occupancy`                                | 98.21%                           | 97.35%                           | 增加 128 B shared 是否影响实际 occupancy |
-| Registers / Thread      | `Launch Statistics`                        | 38                               | 36                               | 代码结构相同，寄存器是否保持一致         |
-| Top Stall Reason        | `Warp State Statistics`                    | MIO Throttle：20.4 cycles，51.5% | MIO Throttle：28.5 cycles，58.6% | 名称、cycles 和占比是否变化              |
+| 指标                          	| NCU `Details` 中的位置                         	| `gemm_tiled`                         	| `gemm_tiled_padding`                 	| 首轮观察问题                                   	|
+| ---                          	| ---                                          	| ---                                  	| ---                                  	| ---                                          	|
+| Time / Duration              	| 页面顶部或 `GPU Speed Of Light Throughput`     	| 2.93 ms                              	| 4.39 ms                              	| padding 是否稳定更快                           	|
+| Compute (SM) Throughput      	| `GPU Speed Of Light Throughput`              	| 96.37%                               	| 96.80%                               	| SM 繁忙程度是否明显变化                          	|
+| Memory Throughput            	| `GPU Speed Of Light Throughput`              	| 96.37%                               	| 96.80%                               	| memory 汇总压力是否变化                         	|
+| DRAM Throughput              	| `GPU Speed Of Light Throughput`              	| 1.33%                                	| 0.95%                                	| 变化是否来自片外显存                             	|
+| L2 Cache Throughput          	| `GPU Speed Of Light Throughput`              	| 32.95%                               	| 22.01%                               	| L2 路径是否基本一致                             	|
+| Achieved Occupancy           	| `Occupancy`                                  	| 98.21%                               	| 97.35%                               	| 增加 128 B shared 是否影响实际 occupancy        	|
+| Registers / Thread           	| `Launch Statistics`                          	| 38                                   	| 36                                   	| 代码结构相同，寄存器是否保持一致                   	|
+| Top Stall Reason             	| `Warp State Statistics`                      	| MIO Throttle：20.4 cycles，51.5%      	| MIO Throttle：28.5 cycles，58.6%      	| 名称、cycles 和占比是否变化                      	|
 
 `Top Stall Reason` 请使用下面的完整格式填写：
 
@@ -161,20 +161,20 @@ Details
 
 Shared Memory 表通常包含 `Instructions`、`Requests`、`Wavefronts`、`% Peak` 和 `Bank Conflicts`，行中区分 Shared Load 与 Shared Store。
 
-| Shared-memory 指标             | `gemm_tiled` | `gemm_tiled_padding` | 从哪里得到                         |
-| ------------------------------ | ------------ | -------------------- | ---------------------------------- |
-| Shared Load Requests           | 335,544,320  | 536,870,912          | Shared Memory 表的 Load 行         |
-| Shared Load Wavefronts         | 402,688,509  | 536,888,686          | Shared Memory 表的 Load 行         |
-| Shared Load Bank Conflicts     | 0            | 0                    | Shared Memory 表的 Load 行         |
-| Load Wavefronts / Requests     | 1.20011      | 1.00003              | 两列分别使用 Wavefronts / Requests |
-| Shared Store Requests          | 33,554,432   | 33,554,432           | Shared Memory 表的 Store 行        |
-| Shared Store Wavefronts        | 33,554,432   | 67,108,864           | Shared Memory 表的 Store 行        |
-| Shared Store Bank Conflicts    | 0            | 33,554,432           | Shared Memory 表的 Store 行        |
-| Store Wavefronts / Requests    | 1.0          | 2.0                  | 两列分别使用 Wavefronts / Requests |
-| Store Conflict Wavefront Share | 0%           | 50.00%               | Bank Conflicts / Wavefronts        |
-| Total Shared Requests          | 369,098,752  | 570,425,344          | Shared Memory 表的 Total 行        |
-| Total Shared Wavefronts        | 440,699,670  | 608,454,300          | Shared Memory 表的 Total 行        |
-| Total Shared Bank Conflicts    | 0            | 33,554,432           | Shared Memory 表的 Total 行        |
+| Shared-memory 指标                    	| `gemm_tiled` 	| `gemm_tiled_padding` 	| 从哪里得到                             	|
+| ---                                  	| ---          	| ---                  	| ---                                  	|
+| Shared Load Requests                 	| 335,544,320  	| 536,870,912          	| Shared Memory 表的 Load 行            	|
+| Shared Load Wavefronts               	| 402,688,509  	| 536,888,686          	| Shared Memory 表的 Load 行            	|
+| Shared Load Bank Conflicts           	| 0            	| 0                    	| Shared Memory 表的 Load 行            	|
+| Load Wavefronts / Requests           	| 1.20011      	| 1.00003              	| 两列分别使用 Wavefronts / Requests     	|
+| Shared Store Requests                	| 33,554,432   	| 33,554,432           	| Shared Memory 表的 Store 行           	|
+| Shared Store Wavefronts              	| 33,554,432   	| 67,108,864           	| Shared Memory 表的 Store 行           	|
+| Shared Store Bank Conflicts          	| 0            	| 33,554,432           	| Shared Memory 表的 Store 行           	|
+| Store Wavefronts / Requests          	| 1.0          	| 2.0                  	| 两列分别使用 Wavefronts / Requests     	|
+| Store Conflict Wavefront Share       	| 0%           	| 50.00%               	| Bank Conflicts / Wavefronts          	|
+| Total Shared Requests                	| 369,098,752  	| 570,425,344          	| Shared Memory 表的 Total 行           	|
+| Total Shared Wavefronts              	| 440,699,670  	| 608,454,300          	| Shared Memory 表的 Total 行           	|
+| Total Shared Bank Conflicts          	| 0            	| 33,554,432           	| Shared Memory 表的 Total 行           	|
 
 ## 如何根据数据判断 bank conflict
 

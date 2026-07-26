@@ -93,7 +93,7 @@ KERNEL_ID="::${KERNEL}:${INVOCATION}"
 # Use one regex so unavailable architecture-specific metrics are omitted by NCU
 # instead of making the whole import fail. The parser reports omitted values as
 # N/A, which is different from a measured value of zero.
-METRICS='regex:^(smsp__sass_inst_executed_op_shared_(ld|st)\.sum|l1tex__data_pipe_lsu_wavefronts_mem_shared_op_(ld|st)\.sum|l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_(ld|st)\.sum|l1tex__t_requests_pipe_lsu_mem_(global|local)_op_(ld|st)\.sum|lts__t_bytes\.sum|dram__bytes_(read|write)\.sum|smsp__pipe_fma_cycles_active\.avg\.pct_of_peak_sustained_active|sm__maximum_warps_per_active_cycle_pct|launch__waves_per_multiprocessor|smsp__warps_eligible\.avg\.per_cycle_active|smsp__sass_inst_executed_op_local_(ld|st)\.sum)$'
+METRICS='regex:^(smsp__sass_inst_executed_op_shared_(ld|st)\.sum|l1tex__data_pipe_lsu_wavefronts_mem_shared_op_(ld|st)\.sum|l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_(ld|st)\.sum|l1tex__t_requests_pipe_lsu_mem_(global|local)_op_(ld|st)\.sum|lts__t_(bytes|sectors)\.sum|dram__bytes_(read|write)\.sum|(sm|smsp)__pipe_fma_cycles_active\.avg\.pct_of_peak_sustained_active|sm__maximum_warps_per_active_cycle_pct|launch__waves_per_multiprocessor|smsp__warps_eligible\.avg\.per_cycle_active|smsp__sass_inst_executed_op_local_(ld|st)\.sum)$'
 
 if ! "$NCU" \
   --import "$REPORT" \
@@ -135,6 +135,27 @@ awk '
     return value[key] " " output_unit
   }
 
+  function as_bytes(key, current_unit) {
+    if (!(key in numeric)) {
+      return -1
+    }
+
+    current_unit = unit[key]
+    if (current_unit == "Kbyte") return numeric[key] * 1000
+    if (current_unit == "Mbyte") return numeric[key] * 1000000
+    if (current_unit == "Gbyte") return numeric[key] * 1000000000
+    if (current_unit == "Tbyte") return numeric[key] * 1000000000000
+    return numeric[key]
+  }
+
+  function human_bytes(bytes) {
+    if (bytes < 0) return "N/A"
+    if (bytes >= 1000000000) return sprintf("%.2f Gbyte", bytes / 1000000000)
+    if (bytes >= 1000000) return sprintf("%.2f Mbyte", bytes / 1000000)
+    if (bytes >= 1000) return sprintf("%.2f Kbyte", bytes / 1000)
+    return sprintf("%.0f byte", bytes)
+  }
+
   function pair(load_key, store_key, fallback_unit) {
     return "load=" shown(load_key, fallback_unit) "; store=" shown(store_key, fallback_unit)
   }
@@ -163,12 +184,16 @@ awk '
   $1 == "lts__t_bytes.sum" {
     save($1, "l2_bytes")
   }
+  $1 == "lts__t_sectors.sum" {
+    save($1, "l2_sectors")
+  }
   $1 == "dram__bytes_read.sum" {
     save($1, "dram_read_bytes")
   }
   $1 == "dram__bytes_write.sum" {
     save($1, "dram_write_bytes")
   }
+  $1 == "sm__pipe_fma_cycles_active.avg.pct_of_peak_sustained_active" ||
   $1 == "smsp__pipe_fma_cycles_active.avg.pct_of_peak_sustained_active" {
     save($1, "fma_util")
   }
@@ -195,14 +220,22 @@ awk '
   }
 
   END {
-    if ("dram_read_bytes" in numeric && "dram_write_bytes" in numeric) {
-      dram_total = numeric["dram_read_bytes"] + numeric["dram_write_bytes"]
-      dram_text = "L2 total=" shown("l2_bytes", "byte") \
+    if ("l2_bytes" in value) {
+      l2_text = shown("l2_bytes", "byte")
+    } else if ("l2_sectors" in numeric) {
+      l2_text = human_bytes(numeric["l2_sectors"] * 32)
+    } else {
+      l2_text = "N/A"
+    }
+
+    if ("dram_read_bytes" in value && "dram_write_bytes" in value) {
+      dram_total = as_bytes("dram_read_bytes") + as_bytes("dram_write_bytes")
+      dram_text = "L2 total=" l2_text \
         "; DRAM read=" shown("dram_read_bytes", "byte") \
         "; write=" shown("dram_write_bytes", "byte") \
-        "; total=" sprintf("%.0f byte", dram_total)
+        "; total=" human_bytes(dram_total)
     } else {
-      dram_text = "L2 total=" shown("l2_bytes", "byte") \
+      dram_text = "L2 total=" l2_text \
         "; DRAM read=" shown("dram_read_bytes", "byte") \
         "; write=" shown("dram_write_bytes", "byte") \
         "; total=N/A"

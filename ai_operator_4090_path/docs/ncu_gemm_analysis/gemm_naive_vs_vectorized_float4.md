@@ -10,15 +10,15 @@
 
 ## 代码变化
 
-| 对比项        | `gemm_naive`          | `gemm_vectorized_float4`  |
-| ------------- | --------------------- | ------------------------- |
-| 每线程输出    | 1 个                  | 相邻 4 个                 |
-| A 读取        | 每个输出各自读取      | 一个 A 标量供四个输出复用 |
-| B 读取        | 标量 `float`          | 对齐时使用 `float4`       |
-| 累加器        | 1 个                  | 4 个                      |
-| block         | 16x16，共 256 threads | 16x16，共 256 threads     |
-| grid.x        | `ceil(N / 16)`        | `ceil(N / 64)`            |
-| shared memory | 不使用                | 不使用                    |
+| 对比项                	| `gemm_naive`                 	| `gemm_vectorized_float4`     	|
+| ---                  	| ---                          	| ---                          	|
+| 每线程输出             	| 1 个                          	| 相邻 4 个                     	|
+| A 读取                	| 每个输出各自读取                	| 一个 A 标量供四个输出复用        	|
+| B 读取                	| 标量 `float`                  	| 对齐时使用 `float4`            	|
+| 累加器                	| 1 个                          	| 4 个                          	|
+| block                	| 16x16，共 256 threads         	| 16x16，共 256 threads         	|
+| grid.x               	| `ceil(N / 16)`               	| `ceil(N / 64)`               	|
+| shared memory        	| 不使用                        	| 不使用                        	|
 
 固定输入 `N=2048` 能够进入 `N % 4 == 0` 的 vectorized 路径。仍需在 Source/SASS 中确认编译后的实际 load 指令宽度。
 
@@ -44,16 +44,16 @@ H2：寄存器、依赖链、向量地址计算或访存效率代价抵消收益
 
 分别选择第 6 次稳定执行的 `gemm_naive_kernel` 和 `gemm_vectorized_float4_kernel`。
 
-| 指标                    | NCU `Details` 中的位置                     | `gemm_naive` | `gemm_vectorized_float4` | 首轮观察问题                    |
-| ----------------------- | ------------------------------------------ | ------------ | ------------------------ | ------------------------------- |
-| Time / Duration         | 页面顶部或 `GPU Speed Of Light Throughput` | 待填写       | 待填写                   | vectorized 版本是否稳定更快     |
-| Compute (SM) Throughput | `GPU Speed Of Light Throughput`            | 待填写       | 待填写                   | 每线程四输出是否提高计算活跃度  |
-| Memory Throughput       | `GPU Speed Of Light Throughput`            | 待填写       | 待填写                   | global/L1 指令压力是否变化      |
-| DRAM Throughput         | `GPU Speed Of Light Throughput`            | 待填写       | 待填写                   | 实际片外带宽是否变化            |
-| L2 Cache Throughput     | `GPU Speed Of Light Throughput`            | 待填写       | 待填写                   | A/B 请求和 cache 压力是否下降   |
-| Achieved Occupancy      | `Occupancy`                                | 待填写       | 待填写                   | 四个累加器是否减少 active warps |
-| Registers / Thread      | `Launch Statistics`                        | 待填写       | 待填写                   | 向量值和累加器增加多少寄存器    |
-| Top Stall Reason        | `Warp State Statistics`                    | 待填写       | 待填写                   | LG Throttle 是否下降或切换      |
+| 指标                          	| NCU `Details` 中的位置                         	| `gemm_naive`                         	| `gemm_vectorized_float4`     	| 首轮观察问题                           	|
+| ---                          	| ---                                          	| ---                                  	| ---                          	| ---                                  	|
+| Time / Duration              	| 页面顶部或 `GPU Speed Of Light Throughput`     	| 3.82 ms                              	| 2.30 ms                        	| vectorized 版本是否稳定更快             	|
+| Compute (SM) Throughput      	| `GPU Speed Of Light Throughput`              	| 98.43 %                              	| 46.46 %                        	| 每线程四输出是否提高计算活跃度            	|
+| Memory Throughput            	| `GPU Speed Of Light Throughput`              	| 98.43 %                              	| 61.97 %                        	| global/L1 指令压力是否变化              	|
+| DRAM Throughput              	| `GPU Speed Of Light Throughput`              	| 0.99 %                               	| 1.65 %                        	| 实际片外带宽是否变化                     	|
+| L2 Cache Throughput          	| `GPU Speed Of Light Throughput`              	| 37.86 %                              	| 21.45 %                        	| A/B 请求和 cache 压力是否下降           	|
+| Achieved Occupancy           	| `Occupancy`                                  	| 98.09 %                              	| 98.35 %                        	| 四个累加器是否减少 active warps         	|
+| Registers / Thread           	| `Launch Statistics`                          	| 40                                   	| 25                        	| 向量值和累加器增加多少寄存器              	|
+| Top Stall Reason             	| `Warp State Statistics`                      	| LG Throttle：27.0 cycles，65.6%       	| Long Scoreboard（18.4 cycles，约占 77.9%）                        	| LG Throttle 是否下降或切换              	|
 
 Top Stall 请填写：`名称：cycles，比例，Estimated Speedup`。
 
@@ -74,14 +74,14 @@ Top Stall：
 
 ## 补充指标
 
-| 补充指标                   | NCU 位置                        | `gemm_naive` | `vectorized_float4` | 用途                       |
-| -------------------------- | ------------------------------- | ------------ | ------------------- | -------------------------- |
-| Global Load Instructions   | Memory Tables / Source Counters | 待填写       | 待填写              | 验证动态 load 指令是否减少 |
-| Global Load Requests       | Memory Tables -> L1/TEX         | 待填写       | 待填写              | 比较 L1 请求数量           |
-| L1 Sectors / Request       | Memory Tables -> L1/TEX         | 待填写       | 待填写              | 检查访问合并和有效宽度     |
-| L2 / DRAM Bytes            | Memory Tables                   | 待填写       | 待填写              | 区分指令减少和字节减少     |
-| Eligible Warps / Scheduler | Scheduler Statistics            | 待填写       | 待填写              | 判断寄存器代价是否影响发射 |
-| Local Load/Store           | Memory Tables -> Local Memory   | 待填写       | 待填写              | 检查 spill                 |
+| 补充指标                       	| NCU 位置                              	| `gemm_naive` 	| `vectorized_float4`  	| 用途                          	|
+| ---                          	| ---                                  	| ---          	| ---                  	| ---                          	|
+| Global Load Instructions     	| Memory Tables / Source Counters      	| 待填写        	| 待填写                	| 验证动态 load 指令是否减少       	|
+| Global Load Requests         	| Memory Tables -> L1/TEX              	| 待填写        	| 待填写                	| 比较 L1 请求数量               	|
+| L1 Sectors / Request         	| Memory Tables -> L1/TEX              	| 待填写        	| 待填写                	| 检查访问合并和有效宽度           	|
+| L2 / DRAM Bytes              	| Memory Tables                        	| 待填写        	| 待填写                	| 区分指令减少和字节减少           	|
+| Eligible Warps / Scheduler   	| Scheduler Statistics                 	| 待填写        	| 待填写                	| 判断寄存器代价是否影响发射        	|
+| Local Load/Store             	| Memory Tables -> Local Memory        	| 待填写        	| 待填写                	| 检查 spill                    	|
 
 ## 4090 执行命令
 

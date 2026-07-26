@@ -26,16 +26,16 @@
 
 ## 快速索引
 
-| Metric                              | NCU Section                            | 它主要回答的问题 |
-| ----------------------------------- | -------------------------------------- | ---------------- |
-| Time / Duration                     | `GPU Speed Of Light Throughput`        | kernel 最终是否更快 |
-| Compute (SM) Throughput             | `GPU Speed Of Light Throughput`        | SM 计算资源有多繁忙 |
-| Memory Throughput                   | `GPU Speed Of Light Throughput`        | 整个 memory 子系统中最忙的路径有多繁忙 |
-| DRAM Throughput                     | `GPU Speed Of Light Throughput`        | 显存带宽是否接近峰值 |
-| L2 Cache Throughput                 | `GPU Speed Of Light Throughput`        | L2 数据通路是否繁忙 |
-| Achieved Occupancy                  | `Occupancy`                            | 实际驻留的 active warp 是否充足 |
-| Registers / Thread                  | `Launch Statistics`                    | 每线程寄存器分配是否可能限制 occupancy |
-| Top Stall Reason                    | `Warp State Statistics`                | warp 最常因为什么不能发射下一条指令 |
+| Metric                       	| NCU Section                          	| 它主要回答的问题                        	|
+| ---                          	| ---                                  	| ---                                  	|
+| Time / Duration              	| `GPU Speed Of Light Throughput`      	| kernel 最终是否更快                    	|
+| Compute (SM) Throughput      	| `GPU Speed Of Light Throughput`      	| SM 计算资源有多繁忙                     	|
+| Memory Throughput            	| `GPU Speed Of Light Throughput`      	| 整个 memory 子系统中最忙的路径有多繁忙    	|
+| DRAM Throughput              	| `GPU Speed Of Light Throughput`      	| 显存带宽是否接近峰值                     	|
+| L2 Cache Throughput          	| `GPU Speed Of Light Throughput`      	| L2 数据通路是否繁忙                     	|
+| Achieved Occupancy           	| `Occupancy`                          	| 实际驻留的 active warp 是否充足         	|
+| Registers / Thread           	| `Launch Statistics`                  	| 每线程寄存器分配是否可能限制 occupancy    	|
+| Top Stall Reason             	| `Warp State Statistics`              	| warp 最常因为什么不能发射下一条指令       	|
 
 ## 1. Time / Duration
 
@@ -74,22 +74,22 @@ Speedup = 3.82 / 2.93 ≈ 1.30x
 
 ### Duration 增大或减小时，如何看其余七项
 
-| Linked Metric                       | Duration 变化    | 如何联动判断 |
-| ----------------------------------- | ---------------- | ------------ |
-| Compute Throughput                  | 增大             | Compute 同升且接近峰值：计算 pipeline 可能受限。<br>Compute 同降：优先怀疑等待或并行度不足。 |
-| Compute Throughput                  | 减小             | Compute 略降：可能只是总执行工作减少。<br>Compute 升高：计算资源利用可能改善。 |
-| Memory Throughput                   | 增大             | Memory 同升：定位 L1/TEX、L2、DRAM 中最忙的层级。<br>Memory 同降：可能是发射不足。 |
-| Memory Throughput                   | 减小             | Memory 不变：总 memory 工作量仍可能减少。<br>Memory 明显降低：压力可能减轻。 |
-| DRAM Throughput                     | 增大             | DRAM 同时很高：怀疑显存带宽。<br>DRAM 仍低：变慢通常不是 bandwidth 导致。 |
-| DRAM Throughput                     | 减小             | DRAM 同降：可能是片外流量减少。<br>DRAM 略升：可能只是执行时间缩短。 |
-| L2 Throughput                       | 增大             | L2 同升：可能是 cache 请求压力增加。<br>L2 下降：检查是否转成更多 DRAM 访问。 |
-| L2 Throughput                       | 减小             | L2 同降：通常与 cache 请求减少一致。<br>L2 升高：可能是供数更积极。 |
-| Achieved Occupancy                  | 增大             | Occupancy 同降：检查 latency hiding。<br>Occupancy 保持很高：通常不是根因。 |
-| Achieved Occupancy                  | 减小             | Occupancy 不变：优化来自其他路径。<br>Occupancy 下降：可能是寄存器复用的合理代价。 |
-| Registers / Thread                  | 增大             | Registers 同增且 occupancy 降：检查寄存器限制。<br>同时排查 local-memory spill。 |
-| Registers / Thread                  | 减小             | Registers 增加：可能换取数据复用。<br>Registers 减少：可能释放 occupancy。 |
-| Top Stall Reason                    | 增大             | 某项 stall cycles/share 同增：它是变慢原因候选。<br>Top Stall 名称切换：说明瓶颈发生转移。 |
-| Top Stall Reason                    | 减小             | 原 stall 下降或切换：可以解释优化机制。<br>stall 占比升高但绝对周期下降：不一定是退化。 |
+| Linked Metric        	| Duration 变化         	| 如何联动判断                                                                           	|
+| ---                  	| ---                  	| ---                                                                                  	|
+| Compute Throughput   	| 增大                  	| Compute 同升且接近峰值：计算 pipeline 可能受限。<br>Compute 同降：优先怀疑等待或并行度不足。   	|
+| Compute Throughput   	| 减小                  	| Compute 略降：可能只是总执行工作减少。<br>Compute 升高：计算资源利用可能改善。                 	|
+| Memory Throughput    	| 增大                  	| Memory 同升：定位 L1/TEX、L2、DRAM 中最忙的层级。<br>Memory 同降：可能是发射不足。           	|
+| Memory Throughput    	| 减小                  	| Memory 不变：总 memory 工作量仍可能减少。<br>Memory 明显降低：压力可能减轻。                 	|
+| DRAM Throughput      	| 增大                  	| DRAM 同时很高：怀疑显存带宽。<br>DRAM 仍低：变慢通常不是 bandwidth 导致。                    	|
+| DRAM Throughput      	| 减小                  	| DRAM 同降：可能是片外流量减少。<br>DRAM 略升：可能只是执行时间缩短。                          	|
+| L2 Throughput        	| 增大                  	| L2 同升：可能是 cache 请求压力增加。<br>L2 下降：检查是否转成更多 DRAM 访问。                 	|
+| L2 Throughput        	| 减小                  	| L2 同降：通常与 cache 请求减少一致。<br>L2 升高：可能是供数更积极。                          	|
+| Achieved Occupancy   	| 增大                  	| Occupancy 同降：检查 latency hiding。<br>Occupancy 保持很高：通常不是根因。                	|
+| Achieved Occupancy   	| 减小                  	| Occupancy 不变：优化来自其他路径。<br>Occupancy 下降：可能是寄存器复用的合理代价。             	|
+| Registers / Thread   	| 增大                  	| Registers 同增且 occupancy 降：检查寄存器限制。<br>同时排查 local-memory spill。           	|
+| Registers / Thread   	| 减小                  	| Registers 增加：可能换取数据复用。<br>Registers 减少：可能释放 occupancy。                  	|
+| Top Stall Reason     	| 增大                  	| 某项 stall cycles/share 同增：它是变慢原因候选。<br>Top Stall 名称切换：说明瓶颈发生转移。    	|
+| Top Stall Reason     	| 减小                  	| 原 stall 下降或切换：可以解释优化机制。<br>stall 占比升高但绝对周期下降：不一定是退化。          	|
 
 ## 2. Compute (SM) Throughput
 
@@ -126,22 +126,22 @@ tiled = 96.38%
 
 ### Compute Throughput 增大或减小时，如何看其余七项
 
-| Linked Metric                       | Compute 变化     | 如何联动判断 |
-| ----------------------------------- | ---------------- | ------------ |
-| Duration                            | 增大             | Duration 下降：支持计算利用改善。<br>Duration 不降：可能只是计算 pipeline 更拥挤。 |
-| Duration                            | 减小             | Duration 同降：可能是总指令减少。<br>Duration 上升：需要重点排查。 |
-| Memory Throughput                   | 增大             | Memory 降：可能从 memory 转向 compute。<br>两者都高：两类路径都繁忙。 |
-| Memory Throughput                   | 减小             | Memory 升：更可能偏 memory-bound。<br>两者都低：可能发射不足。 |
-| DRAM Throughput                     | 增大             | DRAM 低：计算繁忙并非显存推动。<br>DRAM 高：判断双重压力。 |
-| DRAM Throughput                     | 减小             | DRAM 升：显存可能限制计算发射。<br>DRAM 低：检查片上路径或同步。 |
-| L2 Throughput                       | 增大             | L2 降：供数压力可能减轻。<br>L2 同升：更多 L2 供数支持计算。 |
-| L2 Throughput                       | 减小             | L2 升：cache 路径可能受限。<br>L2 同降：可能总工作量减少。 |
-| Achieved Occupancy                  | 增大             | occupancy 低但 Compute 高：现有 warp/ILP 已足够。 |
-| Achieved Occupancy                  | 减小             | occupancy 同降：检查 latency hiding。<br>occupancy 高：通常不是 warp 数不足。 |
-| Registers / Thread                  | 增大             | 寄存器增加：可能来自 register tiling。<br>确认 occupancy 代价可接受。 |
-| Registers / Thread                  | 减小             | 寄存器增加且 occupancy 降：检查压力。<br>寄存器减少：排查 ILP/spill。 |
-| Top Stall Reason                    | 增大             | Math Pipe Throttle 升：计算管线可能饱和。<br>memory stall 降：符合瓶颈迁移。 |
-| Top Stall Reason                    | 减小             | Scoreboard/LG/MIO 升：计算可能在等待数据。<br>所有 stall 都低：检查工作量和发射规模。 |
+| Linked Metric        	| Compute 变化  	| 如何联动判断                                                                           	|
+| ---                  	| ---          	| ---                                                                                  	|
+| Duration             	| 增大          	| Duration 下降：支持计算利用改善。<br>Duration 不降：可能只是计算 pipeline 更拥挤。           	|
+| Duration             	| 减小          	| Duration 同降：可能是总指令减少。<br>Duration 上升：需要重点排查。                           	|
+| Memory Throughput    	| 增大          	| Memory 降：可能从 memory 转向 compute。<br>两者都高：两类路径都繁忙。                       	|
+| Memory Throughput    	| 减小          	| Memory 升：更可能偏 memory-bound。<br>两者都低：可能发射不足。                              	|
+| DRAM Throughput      	| 增大          	| DRAM 低：计算繁忙并非显存推动。<br>DRAM 高：判断双重压力。                                   	|
+| DRAM Throughput      	| 减小          	| DRAM 升：显存可能限制计算发射。<br>DRAM 低：检查片上路径或同步。                             	|
+| L2 Throughput        	| 增大          	| L2 降：供数压力可能减轻。<br>L2 同升：更多 L2 供数支持计算。                                 	|
+| L2 Throughput        	| 减小          	| L2 升：cache 路径可能受限。<br>L2 同降：可能总工作量减少。                                  	|
+| Achieved Occupancy   	| 增大          	| occupancy 低但 Compute 高：现有 warp/ILP 已足够。                                        	|
+| Achieved Occupancy   	| 减小          	| occupancy 同降：检查 latency hiding。<br>occupancy 高：通常不是 warp 数不足。              	|
+| Registers / Thread   	| 增大          	| 寄存器增加：可能来自 register tiling。<br>确认 occupancy 代价可接受。                       	|
+| Registers / Thread   	| 减小          	| 寄存器增加且 occupancy 降：检查压力。<br>寄存器减少：排查 ILP/spill。                        	|
+| Top Stall Reason     	| 增大          	| Math Pipe Throttle 升：计算管线可能饱和。<br>memory stall 降：符合瓶颈迁移。                	|
+| Top Stall Reason     	| 减小          	| Scoreboard/LG/MIO 升：计算可能在等待数据。<br>所有 stall 都低：检查工作量和发射规模。         	|
 
 ## 3. Memory Throughput
 
@@ -189,22 +189,22 @@ tiled = 96.38%，Top Stall 是 MIO Throttle
 
 ### Memory Throughput 增大或减小时，如何看其余七项
 
-| Linked Metric                       | Memory 变化      | 如何联动判断 |
-| ----------------------------------- | ---------------- | ------------ |
-| Duration                            | 增大             | Duration 下降：可能是 memory 利用改善。<br>Duration 上升且 Memory 接近峰值：memory 路径可能受限。 |
-| Duration                            | 减小             | Duration 同降：通常是流量/指令减少。<br>Duration 上升：可能是发射不足。 |
-| Compute Throughput                  | 增大             | Compute 降：瓶颈可能偏 memory。<br>Compute 同升：计算与供数都更活跃。 |
-| Compute Throughput                  | 减小             | Compute 升：可能转向 compute。<br>Compute 同降：检查 scheduler/并行度。 |
-| DRAM Throughput                     | 增大             | DRAM 同升：压力可能在显存。<br>DRAM 低：压力来自片上路径。 |
-| DRAM Throughput                     | 减小             | DRAM 同降：可能是片外流量减少。<br>DRAM 升：显存压力可能被总指标掩盖。 |
-| L2 Throughput                       | 增大             | L2 高、DRAM 低：主要在 cache 层。<br>两者都高：后端流量大。 |
-| L2 Throughput                       | 减小             | L2 同降：cache 请求可能减少。<br>L2 升：压力可能集中到 L2。 |
-| Achieved Occupancy                  | 增大             | occupancy 高且 Memory 满：增加 warp 通常无效。 |
-| Achieved Occupancy                  | 减小             | Occupancy 同降且 Duration 升：可能缺少并发请求和 latency hiding。 |
-| Registers / Thread                  | 增大             | 寄存器降但 Memory 升：排查 spill。<br>寄存器 tiling 也可能提高供数效率。 |
-| Registers / Thread                  | 减小             | 寄存器增：可能把数据留在寄存器复用。<br>同时检查 occupancy。 |
-| Top Stall Reason                    | 增大             | LG/MIO/Scoreboard 升：区分队列压力与数据依赖。 |
-| Top Stall Reason                    | 减小             | memory stall 同降：支持优化有效。<br>stall 不降：可能只是发射减少。 |
+| Linked Metric        	| Memory 变化   	| 如何联动判断                                                                                   	|
+| ---                  	| ---          	| ---                                                                                          	|
+| Duration             	| 增大          	| Duration 下降：可能是 memory 利用改善。<br>Duration 上升且 Memory 接近峰值：memory 路径可能受限。     	|
+| Duration             	| 减小          	| Duration 同降：通常是流量/指令减少。<br>Duration 上升：可能是发射不足。                              	|
+| Compute Throughput   	| 增大          	| Compute 降：瓶颈可能偏 memory。<br>Compute 同升：计算与供数都更活跃。                               	|
+| Compute Throughput   	| 减小          	| Compute 升：可能转向 compute。<br>Compute 同降：检查 scheduler/并行度。                            	|
+| DRAM Throughput      	| 增大          	| DRAM 同升：压力可能在显存。<br>DRAM 低：压力来自片上路径。                                           	|
+| DRAM Throughput      	| 减小          	| DRAM 同降：可能是片外流量减少。<br>DRAM 升：显存压力可能被总指标掩盖。                                	|
+| L2 Throughput        	| 增大          	| L2 高、DRAM 低：主要在 cache 层。<br>两者都高：后端流量大。                                         	|
+| L2 Throughput        	| 减小          	| L2 同降：cache 请求可能减少。<br>L2 升：压力可能集中到 L2。                                         	|
+| Achieved Occupancy   	| 增大          	| occupancy 高且 Memory 满：增加 warp 通常无效。                                                   	|
+| Achieved Occupancy   	| 减小          	| Occupancy 同降且 Duration 升：可能缺少并发请求和 latency hiding。                                 	|
+| Registers / Thread   	| 增大          	| 寄存器降但 Memory 升：排查 spill。<br>寄存器 tiling 也可能提高供数效率。                             	|
+| Registers / Thread   	| 减小          	| 寄存器增：可能把数据留在寄存器复用。<br>同时检查 occupancy。                                         	|
+| Top Stall Reason     	| 增大          	| LG/MIO/Scoreboard 升：区分队列压力与数据依赖。                                                    	|
+| Top Stall Reason     	| 减小          	| memory stall 同降：支持优化有效。<br>stall 不降：可能只是发射减少。                                  	|
 
 ## 4. DRAM Throughput
 
@@ -244,22 +244,22 @@ tiled = 1.32%
 
 ### DRAM Throughput 增大或减小时，如何看其余七项
 
-| Linked Metric                       | DRAM 变化        | 如何联动判断 |
-| ----------------------------------- | ---------------- | ------------ |
-| Duration                            | 增大             | Duration 下降：带宽利用可能改善。<br>Duration 上升且 DRAM 接近峰值：支持 bandwidth-bound。 |
-| Duration                            | 减小             | Duration 同降：支持片外流量减少。<br>Duration 上升：检查供数和并行度。 |
-| Compute Throughput                  | 增大             | Compute 同升：更多数据供给计算。<br>Compute 降：计算可能在等 DRAM。 |
-| Compute Throughput                  | 减小             | Compute 升：显存压力可能解除。<br>Compute 同降：问题可能转移。 |
-| Memory Throughput                   | 增大             | Memory 同高：确认 DRAM 是否最高贡献者。 |
-| Memory Throughput                   | 减小             | Memory 仍高：L1/L2/shared 仍繁忙。<br>Memory 同降：整体工作量可能减少。 |
-| L2 Throughput                       | 增大             | L2 同升：总请求可能增加。<br>L2 降：可能更多请求穿透 L2。 |
-| L2 Throughput                       | 减小             | L2 升：更多请求可能停留在 L2。<br>L2 与 DRAM 同降：总流量可能减少。 |
-| Achieved Occupancy                  | 增大             | occupancy 低：可能难以隐藏 DRAM latency。 |
-| Achieved Occupancy                  | 减小             | Occupancy 同降且 Duration 升：可能无法产生足够并发请求。 |
-| Registers / Thread                  | 增大             | 寄存器减少：排查 spill 流量。<br>寄存器增加：检查 occupancy。 |
-| Registers / Thread                  | 减小             | 寄存器增加：可能来自 register reuse。<br>强制限寄存器时仍要排除 spill。 |
-| Top Stall Reason                    | 增大             | Long Scoreboard 升：偏向等待数据。<br>LG Throttle 升：偏向指令队列。 |
-| Top Stall Reason                    | 减小             | Long Scoreboard 同降：支持显存等待缓解。<br>转为 MIO/Barrier：说明瓶颈迁移。 |
+| Linked Metric        	| DRAM 变化     	| 如何联动判断                                                                           	|
+| ---                  	| ---          	| ---                                                                                  	|
+| Duration             	| 增大          	| Duration 下降：带宽利用可能改善。<br>Duration 上升且 DRAM 接近峰值：支持 bandwidth-bound。   	|
+| Duration             	| 减小          	| Duration 同降：支持片外流量减少。<br>Duration 上升：检查供数和并行度。                       	|
+| Compute Throughput   	| 增大          	| Compute 同升：更多数据供给计算。<br>Compute 降：计算可能在等 DRAM。                         	|
+| Compute Throughput   	| 减小          	| Compute 升：显存压力可能解除。<br>Compute 同降：问题可能转移。                              	|
+| Memory Throughput    	| 增大          	| Memory 同高：确认 DRAM 是否最高贡献者。                                                   	|
+| Memory Throughput    	| 减小          	| Memory 仍高：L1/L2/shared 仍繁忙。<br>Memory 同降：整体工作量可能减少。                     	|
+| L2 Throughput        	| 增大          	| L2 同升：总请求可能增加。<br>L2 降：可能更多请求穿透 L2。                                    	|
+| L2 Throughput        	| 减小          	| L2 升：更多请求可能停留在 L2。<br>L2 与 DRAM 同降：总流量可能减少。                          	|
+| Achieved Occupancy   	| 增大          	| occupancy 低：可能难以隐藏 DRAM latency。                                               	|
+| Achieved Occupancy   	| 减小          	| Occupancy 同降且 Duration 升：可能无法产生足够并发请求。                                   	|
+| Registers / Thread   	| 增大          	| 寄存器减少：排查 spill 流量。<br>寄存器增加：检查 occupancy。                               	|
+| Registers / Thread   	| 减小          	| 寄存器增加：可能来自 register reuse。<br>强制限寄存器时仍要排除 spill。                      	|
+| Top Stall Reason     	| 增大          	| Long Scoreboard 升：偏向等待数据。<br>LG Throttle 升：偏向指令队列。                       	|
+| Top Stall Reason     	| 减小          	| Long Scoreboard 同降：支持显存等待缓解。<br>转为 MIO/Barrier：说明瓶颈迁移。                 	|
 
 ## 5. L2 Cache Throughput
 
@@ -290,22 +290,22 @@ tiled 在 block 内通过 shared memory 复用 A/B，L2 压力下降 4.80 个百
 
 ### L2 Throughput 增大或减小时，如何看其余七项
 
-| Linked Metric                       | L2 变化          | 如何联动判断 |
-| ----------------------------------- | ---------------- | ------------ |
-| Duration                            | 增大             | Duration 下降：L2 供数可能更有效。<br>Duration 上升且 L2 接近峰值：cache 通路可能受限。 |
-| Duration                            | 减小             | Duration 同降：通常符合请求减少。<br>Duration 上升：检查请求穿透或发射不足。 |
-| Compute Throughput                  | 增大             | Compute 同升：L2 供数支持计算。<br>Compute 降：cache 压力可能阻塞计算。 |
-| Compute Throughput                  | 减小             | Compute 升：L2 压力可能解除。<br>Compute 同降：可能总工作量减少。 |
-| Memory Throughput                   | 增大             | Memory 同升：L2 可能是高层指标的重要贡献者。 |
-| Memory Throughput                   | 减小             | Memory 仍高：压力可能转到其他 memory 层。<br>Memory 同降：整体压力减轻。 |
-| DRAM Throughput                     | 增大             | DRAM 低：压力主要停留在 L2。<br>DRAM 同高：大量请求继续访问显存。 |
-| DRAM Throughput                     | 减小             | DRAM 升：可能更多请求穿透 L2。<br>DRAM 同降：更符合总流量减少。 |
-| Achieved Occupancy                  | 增大             | occupancy 高：通常能产生更多并发请求。<br>Duration 变差时不要继续盲目增加 warp。 |
-| Achieved Occupancy                  | 减小             | Occupancy 同降且 Duration 升：L2 较低可能只是请求并发不足。 |
-| Registers / Thread                  | 增大             | 寄存器降：检查数据是否退回 L2。<br>寄存器增：检查 occupancy。 |
-| Registers / Thread                  | 减小             | 寄存器增：可能是 register reuse 生效。<br>寄存器降：排除 spill。 |
-| Top Stall Reason                    | 增大             | Long Scoreboard/LG 同升：L2 请求可能影响发射。 |
-| Top Stall Reason                    | 减小             | 对应 stall 降：支持 cache 压力解除。<br>MIO/Barrier 升：瓶颈迁移。 |
+| Linked Metric        	| L2 变化       	| 如何联动判断                                                                           	|
+| ---                  	| ---          	| ---                                                                                  	|
+| Duration             	| 增大          	| Duration 下降：L2 供数可能更有效。<br>Duration 上升且 L2 接近峰值：cache 通路可能受限。       	|
+| Duration             	| 减小          	| Duration 同降：通常符合请求减少。<br>Duration 上升：检查请求穿透或发射不足。                  	|
+| Compute Throughput   	| 增大          	| Compute 同升：L2 供数支持计算。<br>Compute 降：cache 压力可能阻塞计算。                     	|
+| Compute Throughput   	| 减小          	| Compute 升：L2 压力可能解除。<br>Compute 同降：可能总工作量减少。                           	|
+| Memory Throughput    	| 增大          	| Memory 同升：L2 可能是高层指标的重要贡献者。                                               	|
+| Memory Throughput    	| 减小          	| Memory 仍高：压力可能转到其他 memory 层。<br>Memory 同降：整体压力减轻。                     	|
+| DRAM Throughput      	| 增大          	| DRAM 低：压力主要停留在 L2。<br>DRAM 同高：大量请求继续访问显存。                            	|
+| DRAM Throughput      	| 减小          	| DRAM 升：可能更多请求穿透 L2。<br>DRAM 同降：更符合总流量减少。                              	|
+| Achieved Occupancy   	| 增大          	| occupancy 高：通常能产生更多并发请求。<br>Duration 变差时不要继续盲目增加 warp。              	|
+| Achieved Occupancy   	| 减小          	| Occupancy 同降且 Duration 升：L2 较低可能只是请求并发不足。                                	|
+| Registers / Thread   	| 增大          	| 寄存器降：检查数据是否退回 L2。<br>寄存器增：检查 occupancy。                                	|
+| Registers / Thread   	| 减小          	| 寄存器增：可能是 register reuse 生效。<br>寄存器降：排除 spill。                            	|
+| Top Stall Reason     	| 增大          	| Long Scoreboard/LG 同升：L2 请求可能影响发射。                                           	|
+| Top Stall Reason     	| 减小          	| 对应 stall 降：支持 cache 压力解除。<br>MIO/Barrier 升：瓶颈迁移。                         	|
 
 ## 6. Achieved Occupancy
 
@@ -342,22 +342,22 @@ tiled = 98.20%
 
 ### Achieved Occupancy 增大或减小时，如何看其余七项
 
-| Linked Metric                       | Occupancy 变化   | 如何联动判断 |
-| ----------------------------------- | ---------------- | ------------ |
-| Duration                            | 增大             | Duration 同降：更多 warp 可能改善 latency hiding。<br>Duration 不降：提高 occupancy 没有实际收益。 |
-| Duration                            | 减小             | Duration 仍下降：可能换来更强复用/ILP。<br>Duration 上升：需要重点排查。 |
-| Compute Throughput                  | 增大             | Compute 升：更多 eligible warp 支撑计算。<br>不变：可能已到 pipeline 上限。 |
-| Compute Throughput                  | 减小             | Compute 降：可能缺少 warp 隐藏依赖。<br>Compute 高：现有 occupancy 已足够。 |
-| Memory Throughput                   | 增大             | Memory 升：并发请求可能增加。<br>已接近峰值时更多 warp 未必有益。 |
-| Memory Throughput                   | 减小             | Memory 降且 Duration 升：可能请求并发不足。<br>Duration 降：可能总工作量减少。 |
-| DRAM Throughput                     | 增大             | DRAM 升：更多 outstanding request 利用带宽。<br>接近峰值后帮助有限。 |
-| DRAM Throughput                     | 减小             | DRAM 降且 Long Scoreboard 升：可能无法隐藏显存延迟。 |
-| L2 Throughput                       | 增大             | L2 升：可能有更多并发 cache 请求。<br>结合 Duration 区分供数和拥堵。 |
-| L2 Throughput                       | 减小             | L2 降：可能只是请求减少。<br>Duration 升：检查供数并发。 |
-| Registers / Thread                  | 增大             | 通常伴随寄存器减少或 block 改变。<br>必须排除限寄存器导致的 spill。 |
-| Registers / Thread                  | 减小             | 寄存器增加是常见原因。<br>换来更低 Duration 时可以接受。 |
-| Top Stall Reason                    | 增大             | Scoreboard 降：latency hiding 改善。<br>Not Selected 升：可选 warp 充足。 |
-| Top Stall Reason                    | 减小             | Scoreboard 升：隐藏延迟能力下降。<br>stall 不变：occupancy 可能不关键。 |
+| Linked Metric        	| Occupancy 变化        	| 如何联动判断                                                                                   	|
+| ---                  	| ---                  	| ---                                                                                          	|
+| Duration             	| 增大                  	| Duration 同降：更多 warp 可能改善 latency hiding。<br>Duration 不降：提高 occupancy 没有实际收益。   	|
+| Duration             	| 减小                  	| Duration 仍下降：可能换来更强复用/ILP。<br>Duration 上升：需要重点排查。                             	|
+| Compute Throughput   	| 增大                  	| Compute 升：更多 eligible warp 支撑计算。<br>不变：可能已到 pipeline 上限。                         	|
+| Compute Throughput   	| 减小                  	| Compute 降：可能缺少 warp 隐藏依赖。<br>Compute 高：现有 occupancy 已足够。                         	|
+| Memory Throughput    	| 增大                  	| Memory 升：并发请求可能增加。<br>已接近峰值时更多 warp 未必有益。                                    	|
+| Memory Throughput    	| 减小                  	| Memory 降且 Duration 升：可能请求并发不足。<br>Duration 降：可能总工作量减少。                       	|
+| DRAM Throughput      	| 增大                  	| DRAM 升：更多 outstanding request 利用带宽。<br>接近峰值后帮助有限。                                	|
+| DRAM Throughput      	| 减小                  	| DRAM 降且 Long Scoreboard 升：可能无法隐藏显存延迟。                                              	|
+| L2 Throughput        	| 增大                  	| L2 升：可能有更多并发 cache 请求。<br>结合 Duration 区分供数和拥堵。                                 	|
+| L2 Throughput        	| 减小                  	| L2 降：可能只是请求减少。<br>Duration 升：检查供数并发。                                            	|
+| Registers / Thread   	| 增大                  	| 通常伴随寄存器减少或 block 改变。<br>必须排除限寄存器导致的 spill。                                  	|
+| Registers / Thread   	| 减小                  	| 寄存器增加是常见原因。<br>换来更低 Duration 时可以接受。                                            	|
+| Top Stall Reason     	| 增大                  	| Scoreboard 降：latency hiding 改善。<br>Not Selected 升：可选 warp 充足。                        	|
+| Top Stall Reason     	| 减小                  	| Scoreboard 升：隐藏延迟能力下降。<br>stall 不变：occupancy 可能不关键。                             	|
 
 ## 7. Registers / Thread
 
@@ -401,22 +401,22 @@ tiled = 38 registers/thread
 
 ### Registers / Thread 增大或减小时，如何看其余七项
 
-| Linked Metric                       | Registers 变化   | 如何联动判断 |
-| ----------------------------------- | ---------------- | ------------ |
-| Duration                            | 增大             | Duration 下降：寄存器可能提高复用/ILP。<br>Duration 上升：检查 occupancy 损失。 |
-| Duration                            | 减小             | Duration 下降：可能来自 occupancy 提升。<br>Duration 上升：检查复用损失或 spill。 |
-| Compute Throughput                  | 增大             | Compute 升：可能有更多累加器和 ILP。<br>Compute 降：可能受 occupancy 限制。 |
-| Compute Throughput                  | 减小             | Compute 升：可能有更多 active warp。<br>Compute 降：检查依赖和 spill。 |
-| Memory Throughput                   | 增大             | Memory 降：数据可能留在寄存器复用。<br>Memory 升：仍要排查 spill。 |
-| Memory Throughput                   | 减小             | Memory 升：重点排查 spill。<br>Memory 降：结合 Duration 判断。 |
-| DRAM Throughput                     | 增大             | DRAM 降：可能减少片外访问。<br>DRAM 升：检查 spill 或工作集变化。 |
-| DRAM Throughput                     | 减小             | DRAM/LG 同升：存在 spill 风险。<br>不能只凭寄存器减少确认。 |
-| L2 Throughput                       | 增大             | L2 降：register reuse 可能生效。<br>L2 升：可能复用变差。 |
-| L2 Throughput                       | 减小             | L2 升：检查数据是否退回 memory 层级。 |
-| Achieved Occupancy                  | 增大             | 下降是常见代价。<br>Duration 更低且 warp 足够时可接受。 |
-| Achieved Occupancy                  | 减小             | 上升是常见收益。<br>性能不升说明原 occupancy 可能已足够。 |
-| Top Stall Reason                    | 增大             | Dependency/Math stall 降：ILP 可能改善。<br>Scoreboard 升：occupancy 可能过低。 |
-| Top Stall Reason                    | 减小             | LG/Long Scoreboard 升：检查 spill。<br>Not Selected 升：可调度 warp 可能更多。 |
+| Linked Metric        	| Registers 变化        	| 如何联动判断                                                                   	|
+| ---                  	| ---                  	| ---                                                                          	|
+| Duration             	| 增大                  	| Duration 下降：寄存器可能提高复用/ILP。<br>Duration 上升：检查 occupancy 损失。     	|
+| Duration             	| 减小                  	| Duration 下降：可能来自 occupancy 提升。<br>Duration 上升：检查复用损失或 spill。   	|
+| Compute Throughput   	| 增大                  	| Compute 升：可能有更多累加器和 ILP。<br>Compute 降：可能受 occupancy 限制。         	|
+| Compute Throughput   	| 减小                  	| Compute 升：可能有更多 active warp。<br>Compute 降：检查依赖和 spill。             	|
+| Memory Throughput    	| 增大                  	| Memory 降：数据可能留在寄存器复用。<br>Memory 升：仍要排查 spill。                  	|
+| Memory Throughput    	| 减小                  	| Memory 升：重点排查 spill。<br>Memory 降：结合 Duration 判断。                    	|
+| DRAM Throughput      	| 增大                  	| DRAM 降：可能减少片外访问。<br>DRAM 升：检查 spill 或工作集变化。                    	|
+| DRAM Throughput      	| 减小                  	| DRAM/LG 同升：存在 spill 风险。<br>不能只凭寄存器减少确认。                         	|
+| L2 Throughput        	| 增大                  	| L2 降：register reuse 可能生效。<br>L2 升：可能复用变差。                          	|
+| L2 Throughput        	| 减小                  	| L2 升：检查数据是否退回 memory 层级。                                             	|
+| Achieved Occupancy   	| 增大                  	| 下降是常见代价。<br>Duration 更低且 warp 足够时可接受。                            	|
+| Achieved Occupancy   	| 减小                  	| 上升是常见收益。<br>性能不升说明原 occupancy 可能已足够。                           	|
+| Top Stall Reason     	| 增大                  	| Dependency/Math stall 降：ILP 可能改善。<br>Scoreboard 升：occupancy 可能过低。   	|
+| Top Stall Reason     	| 减小                  	| LG/Long Scoreboard 升：检查 spill。<br>Not Selected 升：可调度 warp 可能更多。    	|
 
 ## 8. Top Stall Reason
 
@@ -435,14 +435,14 @@ NCU 下方显示的优化提示由规则触发，不是固定的 Top Stall 列�
 
 ### GEMM 中常见的 stall
 
-| Stall                         | 通俗解释 |
-| ----------------------------- | -------- |
-| LG Throttle                   | local/global memory 指令队列已满，常见于过于频繁地发射 global/local load/store |
-| MIO Throttle                  | MIO 指令队列已满，可能来自 shared-memory、特殊数学或动态分支指令压力 |
-| Long Scoreboard               | 等待 global/local/texture 等较长延迟的数据依赖返回 |
-| Short Scoreboard              | 等待 shared-memory 或部分较短延迟的数据依赖 |
-| Barrier                       | 等待同一 block 中其他 warp 到达同步点 |
-| Not Selected                  | warp 已经 eligible，但调度器本周期选择了其他 warp；数值高不一定是坏事 |
+| Stall                	| 通俗解释                                                                       	|
+| ---                  	| ---                                                                          	|
+| LG Throttle          	| local/global memory 指令队列已满，常见于过于频繁地发射 global/local load/store     	|
+| MIO Throttle         	| MIO 指令队列已满，可能来自 shared-memory、特殊数学或动态分支指令压力                 	|
+| Long Scoreboard      	| 等待 global/local/texture 等较长延迟的数据依赖返回                                	|
+| Short Scoreboard     	| 等待 shared-memory 或部分较短延迟的数据依赖                                       	|
+| Barrier              	| 等待同一 block 中其他 warp 到达同步点                                            	|
+| Not Selected         	| warp 已经 eligible，但调度器本周期选择了其他 warp；数值高不一定是坏事                	|
 
 ### 当前例子：naive
 
@@ -475,22 +475,22 @@ tiled 将大部分数据复用转移到 shared memory，LG 压力下降，但反
 
 这里的“增大/减小”应比较同一种 stall 的 `cycles per issued instruction` 和占比；如果名称发生变化，则表示主要等待路径发生了切换。
 
-| Linked Metric                       | Top Stall 变化   | 如何联动判断 |
-| ----------------------------------- | ---------------- | ------------ |
-| Duration                            | 增大             | Duration 同升：该 stall 更可能造成退化。<br>Duration 降：可能是其他状态减少更多。 |
-| Duration                            | 减小/切换        | Duration 同降：支持优化有效。<br>Duration 不变：可能出现新瓶颈。 |
-| Compute Throughput                  | 增大             | Compute 降且 memory stall 升：计算在等数据。<br>Math Pipe 与 Compute 同升：计算管线可能饱和。 |
-| Compute Throughput                  | 减小/切换        | Compute 升：等待解除。<br>Compute 不变：其他资源可能接棒。 |
-| Memory Throughput                   | 增大             | Top Stall 是 LG/MIO/Scoreboard 且 Memory 高：定位 memory 路径。<br>Top Stall 是 Barrier：不要归因于 Memory。 |
-| Memory Throughput                   | 减小/切换        | 切换到 Math Pipe/Barrier：瓶颈迁移。<br>Memory 不降：可能只是片上层级改变。 |
-| DRAM Throughput                     | 增大             | Long Scoreboard 与 DRAM 同高：偏显存等待。<br>LG 高但 DRAM 低：偏指令队列。 |
-| DRAM Throughput                     | 减小/切换        | 若下降的是 Long Scoreboard 且 DRAM 同降：支持片外等待缓解。<br>DRAM 不降：原 stall 可能不是显存带宽导致。 |
-| L2 Throughput                       | 增大             | Long Scoreboard/LG 与 L2 同升：检查 cache。<br>MIO 高：更偏 shared 路径。 |
-| L2 Throughput                       | 减小/切换        | 若下降的是 LG/Long Scoreboard 且 L2 同降：支持 cache 压力减轻。<br>切换为 MIO：压力转向 shared。 |
-| Achieved Occupancy                  | 增大             | occupancy 低：stall 更难隐藏。<br>occupancy 高仍 stall：active 不等于 eligible。 |
-| Achieved Occupancy                  | 减小/切换        | occupancy 不变且 stall 降：直接改善依赖/队列。<br>occupancy 降但 Duration 降：可以接受。 |
-| Registers / Thread                  | 增大             | 寄存器增、occupancy 降、Scoreboard 升：检查压力。<br>LG 升：排查 spill。 |
-| Registers / Thread                  | 减小/切换        | Registers 增加且 memory stall 下降：可能是寄存器复用生效。<br>Registers 降且 LG 升：排查 spill。 |
+| Linked Metric        	| Top Stall 变化        	| 如何联动判断                                                                                                   	|
+| ---                  	| ---                  	| ---                                                                                                          	|
+| Duration             	| 增大                  	| Duration 同升：该 stall 更可能造成退化。<br>Duration 降：可能是其他状态减少更多。                                     	|
+| Duration             	| 减小/切换              	| Duration 同降：支持优化有效。<br>Duration 不变：可能出现新瓶颈。                                                    	|
+| Compute Throughput   	| 增大                  	| Compute 降且 memory stall 升：计算在等数据。<br>Math Pipe 与 Compute 同升：计算管线可能饱和。                        	|
+| Compute Throughput   	| 减小/切换              	| Compute 升：等待解除。<br>Compute 不变：其他资源可能接棒。                                                          	|
+| Memory Throughput    	| 增大                  	| Top Stall 是 LG/MIO/Scoreboard 且 Memory 高：定位 memory 路径。<br>Top Stall 是 Barrier：不要归因于 Memory。       	|
+| Memory Throughput    	| 减小/切换              	| 切换到 Math Pipe/Barrier：瓶颈迁移。<br>Memory 不降：可能只是片上层级改变。                                          	|
+| DRAM Throughput      	| 增大                  	| Long Scoreboard 与 DRAM 同高：偏显存等待。<br>LG 高但 DRAM 低：偏指令队列。                                         	|
+| DRAM Throughput      	| 减小/切换              	| 若下降的是 Long Scoreboard 且 DRAM 同降：支持片外等待缓解。<br>DRAM 不降：原 stall 可能不是显存带宽导致。               	|
+| L2 Throughput        	| 增大                  	| Long Scoreboard/LG 与 L2 同升：检查 cache。<br>MIO 高：更偏 shared 路径。                                         	|
+| L2 Throughput        	| 减小/切换              	| 若下降的是 LG/Long Scoreboard 且 L2 同降：支持 cache 压力减轻。<br>切换为 MIO：压力转向 shared。                     	|
+| Achieved Occupancy   	| 增大                  	| occupancy 低：stall 更难隐藏。<br>occupancy 高仍 stall：active 不等于 eligible。                                  	|
+| Achieved Occupancy   	| 减小/切换              	| occupancy 不变且 stall 降：直接改善依赖/队列。<br>occupancy 降但 Duration 降：可以接受。                             	|
+| Registers / Thread   	| 增大                  	| 寄存器增、occupancy 降、Scoreboard 升：检查压力。<br>LG 升：排查 spill。                                            	|
+| Registers / Thread   	| 减小/切换              	| Registers 增加且 memory stall 下降：可能是寄存器复用生效。<br>Registers 降且 LG 升：排查 spill。                     	|
 
 ## 八个指标如何一起使用
 
@@ -507,11 +507,11 @@ tiled 将大部分数据复用转移到 shared memory，LG 压力下降，但反
 
 判断一次优化有效，至少需要三层证据：
 
-| Evidence                      | 需要看到什么 |
-| ----------------------------- | ------------ |
-| 结果正确                      | 与 PyTorch baseline 对拍通过 |
-| 性能结果                      | 多轮 benchmark 中 Duration 稳定下降，差异明显大于测试波动 |
-| 硬件因果                      | 绝对指令/请求数量和 stall 变化符合代码改动的预期 |
+| Evidence     	| 需要看到什么                                           	|
+| ---          	| ---                                                  	|
+| 结果正确       	| 与 PyTorch baseline 对拍通过                           	|
+| 性能结果       	| 多轮 benchmark 中 Duration 稳定下降，差异明显大于测试波动  	|
+| 硬件因果       	| 绝对指令/请求数量和 stall 变化符合代码改动的预期            	|
 
 利用率百分比可以不明显变化。只要完成相同正确工作所需的总时间稳定下降，并且硬件行为与代码改动相符，优化就是有效的。
 

@@ -46,36 +46,36 @@ ncu --query-metrics-mode all | grep 'smsp__warp_issue_stalled_'
 
 ## 快速索引
 
-| Stall Reason                       | warp 正在等待什么                         | 优先排查方向                                 |
-| ---------------------------------- | ----------------------------------------- | -------------------------------------------- |
-| Barrier                            | 同一 block 的其他 warp 到达 CTA barrier   | `__syncthreads()`、到达同步点前的负载不均衡  |
-| Branch Resolving                   | 分支目标和程序计数器更新                  | 频繁分支、复杂控制流、warp divergence        |
-| Dispatch Stall                     | 已准备好的指令被 dispatcher 暂缓          | Source/SASS、指令组合、硬件冲突              |
-| Drain                              | `EXIT` 后尚未完成的 memory 操作           | kernel 尾部大量 store、写访问效率            |
-| IMC Miss                           | immediate constant cache miss             | warp 内 constant 地址不统一、常量访问局部性  |
-| LG Throttle                        | local/global memory 指令队列腾出空间      | global/local 指令过多、寄存器 spill          |
-| Long Scoreboard                    | L1TEX 的 global/local/texture 数据返回    | 访存延迟、合并访问、cache 命中、数据依赖     |
-| Math Pipe Throttle                 | 某条数学执行流水线腾出空间                | 特定数学 pipeline 过度集中                   |
-| Membar                             | memory barrier/fence 完成                 | 不必要的 fence、尚未完成的 memory 操作       |
-| MIO Throttle                       | MIO 指令队列腾出空间                      | shared memory、特殊数学、动态分支指令过多    |
-| Misc                               | 未单独分类的硬件原因                      | Source/SASS、其他 section、工具版本          |
-| No Instructions                    | 指令获取或 instruction cache              | kernel 太短、grid 太小、代码体积和跳转过大   |
-| Not Selected                       | 调度器选择其他 eligible warp              | 通常说明可调度 warp 充足，不一定需要解决     |
-| Short Scoreboard                   | MIO 数据依赖完成                          | shared memory、bank conflict、MUFU、动态分支 |
-| Sleeping                           | warp 中线程处于 blocked/yield/sleep       | `__nanosleep()`、等待策略、线程分组          |
-| TEX Throttle                       | texture 指令队列腾出空间                  | texture/surface 指令过多、访问宽度过小       |
-| Wait                               | 固定延迟执行指令的依赖完成                | 指令依赖链、ILP 不足、活跃 warp 不足         |
-| Selected                           | 已被选择并成功发射指令                    | 正常状态，不是 stall                         |
+| Stall Reason         	| warp 正在等待什么                              	| 优先排查方向                                   	|
+| ---                  	| ---                                          	| ---                                          	|
+| Barrier              	| 同一 block 的其他 warp 到达 CTA barrier         	| `__syncthreads()`、到达同步点前的负载不均衡       	|
+| Branch Resolving     	| 分支目标和程序计数器更新                         	| 频繁分支、复杂控制流、warp divergence            	|
+| Dispatch Stall       	| 已准备好的指令被 dispatcher 暂缓                 	| Source/SASS、指令组合、硬件冲突                  	|
+| Drain                	| `EXIT` 后尚未完成的 memory 操作                 	| kernel 尾部大量 store、写访问效率                	|
+| IMC Miss             	| immediate constant cache miss                	| warp 内 constant 地址不统一、常量访问局部性       	|
+| LG Throttle          	| local/global memory 指令队列腾出空间            	| global/local 指令过多、寄存器 spill             	|
+| Long Scoreboard      	| L1TEX 的 global/local/texture 数据返回         	| 访存延迟、合并访问、cache 命中、数据依赖           	|
+| Math Pipe Throttle   	| 某条数学执行流水线腾出空间                        	| 特定数学 pipeline 过度集中                      	|
+| Membar               	| memory barrier/fence 完成                     	| 不必要的 fence、尚未完成的 memory 操作           	|
+| MIO Throttle         	| MIO 指令队列腾出空间                            	| shared memory、特殊数学、动态分支指令过多         	|
+| Misc                 	| 未单独分类的硬件原因                             	| Source/SASS、其他 section、工具版本             	|
+| No Instructions      	| 指令获取或 instruction cache                   	| kernel 太短、grid 太小、代码体积和跳转过大        	|
+| Not Selected         	| 调度器选择其他 eligible warp                    	| 通常说明可调度 warp 充足，不一定需要解决           	|
+| Short Scoreboard     	| MIO 数据依赖完成                               	| shared memory、bank conflict、MUFU、动态分支    	|
+| Sleeping             	| warp 中线程处于 blocked/yield/sleep            	| `__nanosleep()`、等待策略、线程分组              	|
+| TEX Throttle         	| texture 指令队列腾出空间                        	| texture/surface 指令过多、访问宽度过小           	|
+| Wait                 	| 固定延迟执行指令的依赖完成                        	| 指令依赖链、ILP 不足、活跃 warp 不足              	|
+| Selected             	| 已被选择并成功发射指令                           	| 正常状态，不是 stall                            	|
 
 ## 容易混淆的几组指标
 
-| 容易混淆的指标                     | 核心区别 |
-| ---------------------------------- | -------- |
-| LG Throttle vs Long Scoreboard     | LG 是“global/local 指令队列满”；Long 是“已发出的 L1TEX 操作数据还没回来”。 |
-| MIO Throttle vs Short Scoreboard   | MIO 是“MIO 指令队列满”；Short 是“已发出的 MIO 操作结果还不能使用”。 |
-| Barrier vs Membar                  | Barrier 等其他 warp 到达 CTA 同步点；Membar 等 memory fence 的可见性/顺序要求完成。 |
-| Math Pipe Throttle vs Wait         | Math Pipe 是执行流水线吞吐不够；Wait 是固定延迟指令的数据依赖还未解除。 |
-| Not Selected vs 其他 stall         | Not Selected 的 warp 已经 eligible；其他 stall 通常表示 warp 还不能发射。 |
+| 容易混淆的指标                          	| 核心区别                                                                               	|
+| ---                                  	| ---                                                                                  	|
+| LG Throttle vs Long Scoreboard       	| LG 是“global/local 指令队列满”；Long 是“已发出的 L1TEX 操作数据还没回来”。                  	|
+| MIO Throttle vs Short Scoreboard     	| MIO 是“MIO 指令队列满”；Short 是“已发出的 MIO 操作结果还不能使用”。                          	|
+| Barrier vs Membar                    	| Barrier 等其他 warp 到达 CTA 同步点；Membar 等 memory fence 的可见性/顺序要求完成。         	|
+| Math Pipe Throttle vs Wait           	| Math Pipe 是执行流水线吞吐不够；Wait 是固定延迟指令的数据依赖还未解除。                       	|
+| Not Selected vs 其他 stall            	| Not Selected 的 warp 已经 eligible；其他 stall 通常表示 warp 还不能发射。                  	|
 
 ## 1. 同步与控制流
 
@@ -315,12 +315,12 @@ Details
 
 不能使用“Top Stall 占比下降”作为唯一证据。一次有效优化至少应满足：
 
-| 证据层级                           | 应看到的结果 |
-| ---------------------------------- | ------------ |
-| 正确性                             | 输出结果与 baseline 一致 |
-| 性能                               | 多轮 benchmark 的中位 Duration 稳定下降，且超过波动范围 |
-| 硬件因果                           | 目标 stall 的绝对 cycles 或相关指令/请求减少 |
-| 无严重副作用                       | 没有产生更大的新 stall、spill、occupancy 或流量问题 |
+| 证据层级       	| 应看到的结果                                           	|
+| ---          	| ---                                                  	|
+| 正确性        	| 输出结果与 baseline 一致                                	|
+| 性能          	| 多轮 benchmark 的中位 Duration 稳定下降，且超过波动范围    	|
+| 硬件因果       	| 目标 stall 的绝对 cycles 或相关指令/请求减少              	|
+| 无严重副作用   	| 没有产生更大的新 stall、spill、occupancy 或流量问题       	|
 
 stall 占比是相对值。某项 stall 的绝对周期下降后，因为其他部分下降得更多，它的占比仍可能升高。因此比较两个 kernel 时，应优先看：
 
@@ -332,10 +332,10 @@ Duration
 
 ## 当前 GEMM 示例
 
-| Kernel                             | Top Stall                            | 代码与硬件解释 |
-| ---------------------------------- | ------------------------------------ | -------------- |
-| `gemm_naive`                       | `LG Throttle: 27.0 cycles, 65.6%`   | K 循环反复发射 global load，LG 指令队列压力大；DRAM 很低说明不是显存带宽跑满。 |
-| `gemm_tiled`                       | `MIO Throttle: 20.4 cycles, 51.5%`  | 数据复用转到 shared memory，LG 压力下降，但 shared-memory 指令使 MIO 队列成为主要压力。 |
+| Kernel       	| Top Stall                            	| 代码与硬件解释                                                                          	|
+| ---          	| ---                                  	| ---                                                                                  	|
+| `gemm_naive` 	| `LG Throttle: 27.0 cycles, 65.6%`    	| K 循环反复发射 global load，LG 指令队列压力大；DRAM 很低说明不是显存带宽跑满。                	|
+| `gemm_tiled` 	| `MIO Throttle: 20.4 cycles, 51.5%`   	| 数据复用转到 shared memory，LG 压力下降，但 shared-memory 指令使 MIO 队列成为主要压力。      	|
 
 下一步实验应比较 `gemm_tiled` 与 register-tiled 版本：如果 shared load/store 指令数和 MIO stall 同时下降，而且 Duration 稳定下降，才能证明 register tiling 缓解了 MIO 压力。
 
