@@ -1,0 +1,2 @@
+# Official CUDA 12.6 wheel from https://wheels.vllm.ai/0.10.0/cu126/
+vllm==0.10.0+cu126
