@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-cd "$PROJECT_DIR"
-
 OP=${1:-gemm_naive}
 if (( $# > 0 )); then
   shift
 fi
 PROFILE_ARGS=("$@")
-ITERS=${ITERS:-1}
+ITERS=${ITERS:-20}
 OUT_DIR=${OUT_DIR:-reports/ncu}
 NCU_USE_SUDO=${NCU_USE_SUDO:-0}
 

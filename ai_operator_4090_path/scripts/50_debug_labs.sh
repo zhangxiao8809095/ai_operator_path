@@ -88,7 +88,6 @@ EOF
 
 build_faults() {
   export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-8.9}
-  export MAX_JOBS=${MAX_JOBS:-2}
   (
     cd "$FAULT_DIR"
     "$PYTHON_BIN" setup.py build_ext --inplace

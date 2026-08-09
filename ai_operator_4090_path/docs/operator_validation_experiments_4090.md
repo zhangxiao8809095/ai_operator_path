@@ -70,32 +70,13 @@ NaN / +Inf / -Inf 数量
 
 ```bash
 pwd
-python scripts/verify_workspace.py
-bash scripts/00_check_env.sh
-python3 -m venv --system-site-packages .venv
-source .venv/bin/activate
-bash scripts/00_check_env.sh --strict
-bash scripts/10_build.sh
-```
-
-`--system-site-packages`用于复用租赁镜像已经安装并验证过的CUDA版PyTorch。若镜像没有CUDA版PyTorch，先按服务器驱动与目标PyTorch版本安装对应的官方CUDA wheel；普通空`venv`不能直接构建本扩展。主算子工程与`vllm_learning/`必须使用两个独立虚拟环境，避免二者的PyTorch/vLLM依赖互相覆盖。
-
-如果上传内容包含Git元数据，再额外记录版本；只上传了本子目录时这两项标记为N/A，不能让它们阻断实验：
-
-```bash
 git rev-parse HEAD
 git status --short
+bash scripts/00_check_env.sh
+python -m venv .venv
+source .venv/bin/activate
+bash scripts/10_build.sh
 ```
-
-首次上传可用一条命令完成静态一致性、RTX 4090工具链、干净构建、24接口、sm_89 cubin和GPU冒烟检查：
-
-```bash
-bash scripts/15_verify_4090.sh smoke
-```
-
-该入口会先恢复Shell/Python入口的执行权限，适配zip或网页上传后权限位丢失的情况。
-
-正式进入Gate 1前执行`bash scripts/15_verify_4090.sh full`；它会重新干净构建并运行全量pytest。该入口不会运行Sanitizer、NSYS或NCU，重型实验仍按后续闸门逐项执行。
 
 导出接口检查：
 
@@ -144,8 +125,6 @@ bash scripts/40_sanitize.sh synccheck softmax
 bash scripts/40_sanitize.sh synccheck norm
 bash scripts/40_sanitize.sh synccheck attention
 ```
-
-`40_sanitize.sh`使用`tests/test_sanitizer_smoke.py`中的专用小shape矩阵：覆盖24个正式接口、Norm向量路径与tail fallback，但不重复大型性能shape和数百次稳定性循环。全量shape/数值/性质验证属于Gate 1，Sanitizer在这里专门回答内存、安全与同步问题。
 
 验收要求：没有未解释的 invalid access、race hazard、uninitialized read 或 synchronization error。每个 warning 都要记录并判断，不能只看进程退出码。
 
@@ -305,7 +284,7 @@ python scripts/extract_ncu_results.py \
   --strict
 ```
 
-NCU脚本默认执行5次warmup和1次正式调用，因此默认读取第6次kernel调用；这是为了控制Full采集时长。若显式设置`ITERS=<N>`，第一个正式调用仍是第6次；若修改了`benchmark/profile_entry.py`中的warmup次数，再用`--invocation <N>`同步修改。NCU不在默认路径时使用`--ncu-bin /path/to/ncu`或设置`NCU_BIN`。生成结果中的`N/A`表示报告未包含该metric，或该证据只能由NSYS、源码或SASS确认，不能按测量值`0`处理。旧的两个Shell脚本仍保留，用于排查某一份报告的kernel匹配或原始指标。
+默认读取第6次kernel调用。若采集时修改了warmup次数，使用`--invocation <N>`同步修改；NCU不在默认路径时使用`--ncu-bin /path/to/ncu`或设置`NCU_BIN`。生成结果中的`N/A`表示报告未包含该metric，或该证据只能由NSYS、源码或SASS确认，不能按测量值`0`处理。旧的两个Shell脚本仍保留，用于排查某一份报告的kernel匹配或原始指标。
 
 ## 4. GEMM 实验与指标
 

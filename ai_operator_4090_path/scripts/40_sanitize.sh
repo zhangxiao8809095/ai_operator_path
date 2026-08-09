@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-cd "$PROJECT_DIR"
-
 TOOL=${1:-memcheck}
 GROUP=${2:-all}
 
@@ -39,19 +36,19 @@ esac
 
 case "$GROUP" in
   gemm)
-    TEST_ARGS=(tests/test_sanitizer_smoke.py -k sanitizer_gemm)
+    TEST_ARGS=(tests/test_gemm.py tests/test_operator_validation.py -k gemm)
     ;;
   softmax)
-    TEST_ARGS=(tests/test_sanitizer_smoke.py -k sanitizer_softmax)
+    TEST_ARGS=(tests/test_softmax_norm.py tests/test_operator_validation.py -k softmax)
     ;;
   norm)
-    TEST_ARGS=(tests/test_sanitizer_smoke.py -k "sanitizer_layernorm or sanitizer_rmsnorm")
+    TEST_ARGS=(tests/test_softmax_norm.py tests/test_operator_validation.py -k "layernorm or rmsnorm")
     ;;
   attention)
-    TEST_ARGS=(tests/test_sanitizer_smoke.py -k sanitizer_attention)
+    TEST_ARGS=(tests/test_attention.py tests/test_operator_validation.py -k attention)
     ;;
   all)
-    TEST_ARGS=(tests/test_sanitizer_smoke.py)
+    TEST_ARGS=(tests)
     ;;
   *)
     echo "Unsupported group: $GROUP" >&2

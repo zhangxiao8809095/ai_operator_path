@@ -70,7 +70,6 @@ def host_checks() -> tuple[dict[str, Any], list[str]]:
         "debug_labs/fault_extension/setup.py",
         "docs/operator_validation_experiments_4090.md",
         "tests/test_operator_validation.py",
-        "tests/test_sanitizer_smoke.py",
     ]
     missing_files = [relative for relative in required_files if not (ROOT / relative).is_file()]
     executable_files = [
