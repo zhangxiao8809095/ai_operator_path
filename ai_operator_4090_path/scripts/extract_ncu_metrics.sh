@@ -66,7 +66,9 @@ find_ncu() {
   local candidate
   for candidate in \
     /usr/local/cuda/bin/ncu \
-    /usr/local/cuda-12.6/bin/ncu; do
+    /usr/local/cuda-12.6/bin/ncu \
+    /usr/local/cuda-12.4/bin/ncu \
+    /usr/local/cuda-12.1/bin/ncu; do
     if [[ -x "$candidate" ]]; then
       printf '%s\n' "$candidate"
       return

@@ -44,7 +44,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("rmsnorm_row", &rmsnorm_row, "Row-wise RMSNorm CUDA");
     m.def("rmsnorm_block_reduce", &rmsnorm_block_reduce, "Row-wise RMSNorm CUDA with block reduction");
     m.def("rmsnorm_warp_reduce", &rmsnorm_warp_reduce, "Row-wise RMSNorm CUDA with warp-shuffle reduction");
-    m.def("rmsnorm_vectorized", &rmsnorm_vectorized, "Float4 vectorized row-wise RMSNorm CUDA");
+    m.def("rmsnorm_vectorized", &rmsnorm_vectorized, "Float2 vectorized row-wise RMSNorm CUDA");
     m.def("rmsnorm_vectorized_float4", &rmsnorm_vectorized_float4, "Float4 vectorized row-wise RMSNorm CUDA");
     m.def("attention_naive", &attention_naive, "Naive causal/non-causal attention CUDA");
     m.def("attention_causal_naive", &attention_causal_naive, "Naive causal attention CUDA");

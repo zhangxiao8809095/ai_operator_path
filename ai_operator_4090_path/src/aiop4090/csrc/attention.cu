@@ -11,12 +11,12 @@ namespace {
 // Each block computes one O[b,h,i,d_out]. Threads reduce over key positions j.
 // This is intentionally simple and slow. It is for correctness + Nsight observation,
 // then you replace it with tiled/online-softmax versions during the mini-FlashAttention phase.
+template <bool Causal>
 __global__ void attention_naive_kernel(const float* __restrict__ Q,
                                        const float* __restrict__ K,
                                        const float* __restrict__ V,
                                        float* __restrict__ O,
-                                       int B, int H, int S, int D,
-                                       bool causal) {
+                                       int B, int H, int S, int D) {
     extern __shared__ float smem[];
     float* smax = smem;
     float* ssum = smem;
@@ -34,7 +34,7 @@ __global__ void attention_naive_kernel(const float* __restrict__ Q,
 
     float local_max = -FLT_MAX;
     for (int j = tid; j < S; j += blockDim.x) {
-        if (causal && j > i) continue;
+        if (Causal && j > i) continue;
         float score = 0.0f;
         int q_base = (base + i) * D;
         int k_base = (base + j) * D;
@@ -56,7 +56,7 @@ __global__ void attention_naive_kernel(const float* __restrict__ Q,
     float local_sum = 0.0f;
     float local_acc = 0.0f;
     for (int j = tid; j < S; j += blockDim.x) {
-        if (causal && j > i) continue;
+        if (Causal && j > i) continue;
         float score = 0.0f;
         int q_base = (base + i) * D;
         int k_base = (base + j) * D;
@@ -247,53 +247,32 @@ __global__ void attention_tiled_online_softmax_kernel(const float* __restrict__ 
     }
 }
 
-} // namespace
-
-torch::Tensor attention_naive(torch::Tensor Q, torch::Tensor K, torch::Tensor V, bool causal) {
+void check_attention_inputs(const torch::Tensor& Q,
+                            const torch::Tensor& K,
+                            const torch::Tensor& V) {
     CHECK_INPUT(Q);
     CHECK_INPUT(K);
     CHECK_INPUT(V);
+    CHECK_SAME_DEVICE(Q, K);
+    CHECK_SAME_DEVICE(Q, V);
     TORCH_CHECK(Q.dim() == 4 && K.dim() == 4 && V.dim() == 4, "Q/K/V must be [B,H,S,D]");
     TORCH_CHECK(Q.sizes() == K.sizes() && Q.sizes() == V.sizes(), "Q/K/V shape mismatch");
-    int B = static_cast<int>(Q.size(0));
-    int H = static_cast<int>(Q.size(1));
-    int S = static_cast<int>(Q.size(2));
-    int D = static_cast<int>(Q.size(3));
-    auto O = torch::empty_like(Q);
-    int block = 128;
-    dim3 grid(D, S, B * H);
-    attention_naive_kernel<<<grid, block, block * sizeof(float)>>>(
-        Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(), O.data_ptr<float>(),
-        B, H, S, D, causal);
-    return O;
+    TORCH_CHECK(Q.size(2) > 0 && Q.size(3) > 0, "attention requires S > 0 and D > 0");
+    CHECK_DIM_FITS_INT(Q, 0);
+    CHECK_DIM_FITS_INT(Q, 1);
+    CHECK_DIM_FITS_INT(Q, 2);
+    CHECK_DIM_FITS_INT(Q, 3);
 }
 
-torch::Tensor attention_causal_naive(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
-    CHECK_INPUT(Q);
-    CHECK_INPUT(K);
-    CHECK_INPUT(V);
-    TORCH_CHECK(Q.dim() == 4 && K.dim() == 4 && V.dim() == 4, "Q/K/V must be [B,H,S,D]");
-    TORCH_CHECK(Q.sizes() == K.sizes() && Q.sizes() == V.sizes(), "Q/K/V shape mismatch");
-    int B = static_cast<int>(Q.size(0));
-    int H = static_cast<int>(Q.size(1));
-    int S = static_cast<int>(Q.size(2));
-    int D = static_cast<int>(Q.size(3));
-    auto O = torch::empty_like(Q);
-    int block = 128;
-    dim3 grid(D, S, B * H);
-    attention_naive_kernel<<<grid, block, block * sizeof(float)>>>(
-        Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(), O.data_ptr<float>(),
-        B, H, S, D, true);
-    return O;
-}
-
-torch::Tensor attention_kv_cache_decode(torch::Tensor Q,
-                                        torch::Tensor K_cache,
-                                        torch::Tensor V_cache,
-                                        int kv_len) {
+void check_kv_decode_inputs(const torch::Tensor& Q,
+                            const torch::Tensor& K_cache,
+                            const torch::Tensor& V_cache,
+                            int kv_len) {
     CHECK_INPUT(Q);
     CHECK_INPUT(K_cache);
     CHECK_INPUT(V_cache);
+    CHECK_SAME_DEVICE(Q, K_cache);
+    CHECK_SAME_DEVICE(Q, V_cache);
     TORCH_CHECK(Q.dim() == 4, "Q must be [B,H,1,D]");
     TORCH_CHECK(K_cache.dim() == 4 && V_cache.dim() == 4, "K/V cache must be [B,H,S,D]");
     TORCH_CHECK(Q.size(2) == 1, "Q decode length must be 1");
@@ -302,17 +281,77 @@ torch::Tensor attention_kv_cache_decode(torch::Tensor Q,
                 Q.size(1) == K_cache.size(1) &&
                 Q.size(3) == K_cache.size(3),
                 "Q and K/V cache B/H/D mismatch");
+    TORCH_CHECK(K_cache.size(2) > 0 && Q.size(3) > 0, "KV decode requires cache S > 0 and D > 0");
+    TORCH_CHECK(kv_len > 0 && kv_len <= K_cache.size(2),
+                "kv_len must be in [1, cache sequence length]");
+    CHECK_DIM_FITS_INT(Q, 0);
+    CHECK_DIM_FITS_INT(Q, 1);
+    CHECK_DIM_FITS_INT(K_cache, 2);
+    CHECK_DIM_FITS_INT(Q, 3);
+}
+
+} // namespace
+
+torch::Tensor attention_naive(torch::Tensor Q, torch::Tensor K, torch::Tensor V, bool causal) {
+    check_attention_inputs(Q, K, V);
+    c10::cuda::CUDAGuard device_guard(Q.device());
+    int B = static_cast<int>(Q.size(0));
+    int H = static_cast<int>(Q.size(1));
+    int S = static_cast<int>(Q.size(2));
+    int D = static_cast<int>(Q.size(3));
+    auto O = torch::empty_like(Q);
+    if (B == 0 || H == 0) return O;
+    int block = 128;
+    dim3 grid(D, S, B * H);
+    if (causal) {
+        attention_naive_kernel<true><<<grid, block, block * sizeof(float), at::cuda::getCurrentCUDAStream()>>>(
+            Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(), O.data_ptr<float>(),
+            B, H, S, D);
+    } else {
+        attention_naive_kernel<false><<<grid, block, block * sizeof(float), at::cuda::getCurrentCUDAStream()>>>(
+            Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(), O.data_ptr<float>(),
+            B, H, S, D);
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return O;
+}
+
+torch::Tensor attention_causal_naive(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
+    check_attention_inputs(Q, K, V);
+    c10::cuda::CUDAGuard device_guard(Q.device());
+    int B = static_cast<int>(Q.size(0));
+    int H = static_cast<int>(Q.size(1));
+    int S = static_cast<int>(Q.size(2));
+    int D = static_cast<int>(Q.size(3));
+    auto O = torch::empty_like(Q);
+    if (B == 0 || H == 0) return O;
+    int block = 128;
+    dim3 grid(D, S, B * H);
+    attention_naive_kernel<true><<<grid, block, block * sizeof(float), at::cuda::getCurrentCUDAStream()>>>(
+        Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(), O.data_ptr<float>(),
+        B, H, S, D);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return O;
+}
+
+torch::Tensor attention_kv_cache_decode(torch::Tensor Q,
+                                        torch::Tensor K_cache,
+                                        torch::Tensor V_cache,
+                                        int kv_len) {
+    check_kv_decode_inputs(Q, K_cache, V_cache, kv_len);
+    c10::cuda::CUDAGuard device_guard(Q.device());
     int B = static_cast<int>(Q.size(0));
     int H = static_cast<int>(Q.size(1));
     int S = static_cast<int>(K_cache.size(2));
     int D = static_cast<int>(Q.size(3));
-    TORCH_CHECK(kv_len > 0 && kv_len <= S, "kv_len must be in [1, cache sequence length]");
     auto O = torch::empty_like(Q);
+    if (B == 0 || H == 0) return O;
     int block = 128;
     dim3 grid(D, B * H);
-    attention_kv_cache_decode_kernel<<<grid, block, block * sizeof(float)>>>(
+    attention_kv_cache_decode_kernel<<<grid, block, block * sizeof(float), at::cuda::getCurrentCUDAStream()>>>(
         Q.data_ptr<float>(), K_cache.data_ptr<float>(), V_cache.data_ptr<float>(), O.data_ptr<float>(),
         B, H, S, D, kv_len);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return O;
 }
 
@@ -320,20 +359,19 @@ torch::Tensor attention_tiled_online_softmax(torch::Tensor Q,
                                              torch::Tensor K,
                                              torch::Tensor V,
                                              bool causal) {
-    CHECK_INPUT(Q);
-    CHECK_INPUT(K);
-    CHECK_INPUT(V);
-    TORCH_CHECK(Q.dim() == 4 && K.dim() == 4 && V.dim() == 4, "Q/K/V must be [B,H,S,D]");
-    TORCH_CHECK(Q.sizes() == K.sizes() && Q.sizes() == V.sizes(), "Q/K/V shape mismatch");
+    check_attention_inputs(Q, K, V);
+    c10::cuda::CUDAGuard device_guard(Q.device());
     int B = static_cast<int>(Q.size(0));
     int H = static_cast<int>(Q.size(1));
     int S = static_cast<int>(Q.size(2));
     int D = static_cast<int>(Q.size(3));
     auto O = torch::empty_like(Q);
+    if (B == 0 || H == 0) return O;
     int block = 128;
     dim3 grid(D, S, B * H);
-    attention_tiled_online_softmax_kernel<<<grid, block, 3 * block * sizeof(float)>>>(
+    attention_tiled_online_softmax_kernel<<<grid, block, 3 * block * sizeof(float), at::cuda::getCurrentCUDAStream()>>>(
         Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(), O.data_ptr<float>(),
         B, H, S, D, causal);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return O;
 }

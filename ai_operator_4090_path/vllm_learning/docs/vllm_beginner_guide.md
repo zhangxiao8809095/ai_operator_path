@@ -164,15 +164,15 @@ LabConfig(
 
 各参数的含义：
 
-| 参数 | 作用 | 入门阶段建议 |
-| --- | --- | --- |
-| `model` | Hugging Face 模型 ID 或本地路径 | 先使用默认 1.5B 模型 |
-| `dtype` | 模型权重和计算的数据类型 | 保持 `auto` |
-| `tensor_parallel_size` | 模型切分到多少张 GPU | 单张 4090 必须为 `1` |
-| `gpu_memory_utilization` | vLLM 实例可使用的显存比例 | 从 `0.85` 开始 |
-| `max_model_len` | 允许的最大上下文长度 | 入门先用 `4096` |
-| `seed` | 随机采样种子 | 固定后便于对比实验 |
-| `trust_remote_code` | 是否运行模型仓库自定义代码 | 默认关闭 |
+| 参数                     | 作用                            | 入门阶段建议         |
+| ------------------------ | ------------------------------- | -------------------- |
+| `model`                  | Hugging Face 模型 ID 或本地路径 | 先使用默认 1.5B 模型 |
+| `dtype`                  | 模型权重和计算的数据类型        | 保持 `auto`          |
+| `tensor_parallel_size`   | 模型切分到多少张 GPU            | 单张 4090 必须为 `1` |
+| `gpu_memory_utilization` | vLLM 实例可使用的显存比例       | 从 `0.85` 开始       |
+| `max_model_len`          | 允许的最大上下文长度            | 入门先用 `4096`      |
+| `seed`                   | 随机采样种子                    | 固定后便于对比实验   |
+| `trust_remote_code`      | 是否运行模型仓库自定义代码      | 默认关闭             |
 
 修改配置时不需要改 Python 文件：
 
@@ -345,11 +345,11 @@ outputs = llm.generate(
 
 这两个概念经常被混淆：
 
-| 概念 | 请求何时到达 | 调度特点 |
-| --- | --- | --- |
-| 离线批量推理 | 开始前已经准备好一批 prompt | 一次提交给本地引擎 |
-| 静态 batching | 同一批通常一起开始、一起结束 | 容易被最长请求拖慢 |
-| Continuous batching | 在线请求持续到达和结束 | 每个调度步动态加入或移出请求 |
+| 概念                | 请求何时到达                 | 调度特点                     |
+| ------------------- | ---------------------------- | ---------------------------- |
+| 离线批量推理        | 开始前已经准备好一批 prompt  | 一次提交给本地引擎           |
+| 静态 batching       | 同一批通常一起开始、一起结束 | 容易被最长请求拖慢           |
+| Continuous batching | 在线请求持续到达和结束       | 每个调度步动态加入或移出请求 |
 
 OpenAI 服务模式更能体现 continuous batching：某个请求生成完后，它占用的位置可以
 很快让给新请求，而不必等待同批所有请求结束。
@@ -434,11 +434,11 @@ vLLM 版本、GPU kernel 和并行策略变化都可能影响结果。
 
 ### 推荐起点
 
-| 任务 | temperature | top_p | top_k |
-| --- | ---: | ---: | ---: |
-| 确定性抽取/分类 | `0` | `1.0` | 不限制 |
-| 普通问答 | `0.2–0.7` | `0.9` | 不限制或 `40` |
-| 创意生成 | `0.8–1.1` | `0.95` | `40–100` |
+| 任务            | temperature | top_p  | top_k         |
+| --------------- | ----------: | -----: | ------------: |
+| 确定性抽取/分类 | `0`         | `1.0`  | 不限制        |
+| 普通问答        | `0.2–0.7`   | `0.9`  | 不限制或 `40` |
+| 创意生成        | `0.8–1.1`   | `0.95` | `40–100`      |
 
 这些不是固定标准。正确方法是准备代表性测试集，对准确性、重复率和多样性做对比。
 
@@ -506,11 +506,11 @@ bash scripts/run_example.sh kv-cache --batch-size 16 --repeat 240
 
 每次只改变一个变量，并记录：
 
-| 实验 | batch size | prompt 长度 | max tokens | 峰值显存 | 是否 OOM |
-| --- | ---: | ---: | ---: | ---: | --- |
-| 基线 | 8 | 约 X token | 64 |  |  |
-| 增并发 | 16 | 约 X token | 64 |  |  |
-| 增上下文 | 16 | 约 Y token | 64 |  |  |
+| 实验     | batch size | prompt 长度 | max tokens | 峰值显存 | 是否 OOM |
+| -------- | ---------: | ----------: | ---------: | -------: | -------- |
+| 基线     | 8          | 约 X token  | 64         |          |          |
+| 增并发   | 16         | 约 X token  | 64         |          |          |
+| 增上下文 | 16         | 约 Y token  | 64         |          |          |
 
 ### OOM 时的排查顺序
 
@@ -568,12 +568,12 @@ bash scripts/serve_openai.sh
 
 服务脚本读取与离线推理一致的模型、显存和张量并行配置，并额外使用：
 
-| 变量 | 默认值 |
-| --- | --- |
-| `VLLM_HOST` | `127.0.0.1` |
-| `VLLM_PORT` | `8000` |
-| `VLLM_API_KEY` | `local-token` |
-| `VLLM_SERVED_MODEL_NAME` | `vllm-lab` |
+| 变量                     | 默认值        |
+| ------------------------ | ------------- |
+| `VLLM_HOST`              | `127.0.0.1`   |
+| `VLLM_PORT`              | `8000`        |
+| `VLLM_API_KEY`           | `local-token` |
+| `VLLM_SERVED_MODEL_NAME` | `vllm-lab`    |
 
 先检查健康状态和模型列表：
 
@@ -648,14 +648,14 @@ curl -s http://127.0.0.1:8000/metrics \
 
 ## 11. 离线推理和在线服务怎样选择
 
-| 场景 | 推荐方式 | 原因 |
-| --- | --- | --- |
-| 一次性处理本地数据集 | `LLM.generate()` | 简单、没有服务管理成本 |
-| 模型效果评测 | 离线批量 | 输入和结果容易固化 |
-| 多个应用共享模型 | OpenAI 兼容服务 | 统一接口和调度 |
-| 需要流式输出 | 在线服务 | 客户端接口更合适 |
-| 学习采样参数 | 离线推理 | 易控制变量 |
-| 学习 continuous batching | 在线并发请求 | 更接近真实调度 |
+| 场景                     | 推荐方式         | 原因                   |
+| ------------------------ | ---------------- | ---------------------- |
+| 一次性处理本地数据集     | `LLM.generate()` | 简单、没有服务管理成本 |
+| 模型效果评测             | 离线批量         | 输入和结果容易固化     |
+| 多个应用共享模型         | OpenAI 兼容服务  | 统一接口和调度         |
+| 需要流式输出             | 在线服务         | 客户端接口更合适       |
+| 学习采样参数             | 离线推理         | 易控制变量             |
+| 学习 continuous batching | 在线并发请求     | 更接近真实调度         |
 
 两种方式底层都使用 vLLM 引擎，区别主要在请求入口、生命周期和调度环境。
 
@@ -805,3 +805,428 @@ curl -s http://127.0.0.1:8000/metrics \
 
 如果这条主线能够解释清楚，再学习 prefix caching、chunked prefill、量化、
 speculative decoding 和性能 benchmark 会顺畅很多。
+
+## 15. vLLM 阶段出口闭卷口试
+
+这32道题既是学习导航，也是入门阶段的停止线。不要先顺序重读全文：先闭卷回答，答不出的题再回到对应章节和实验。
+
+### 15.1 一道题怎样才算掌握
+
+每道题按四级记录：
+
+| 等级 | 表现                                             |
+| :--: | :----------------------------------------------- |
+| 0    | 不知道问题在问什么                               |
+| 1    | 看正文能理解，但不能独立说明                     |
+| 2    | 能脱离文档解释概念和因果，但缺少自己的运行证据   |
+| 3    | 能闭卷解释，并能指向日志、输出、指标或故障记录   |
+
+完整回答尽量包含：
+
+```text
+它是什么
+  -> 为什么需要它
+  -> vLLM中怎样发生
+  -> 我用什么命令、日志或指标验证过
+  -> 它的适用边界或常见误区是什么
+```
+
+API参数名可以查文档；核心流程、因果关系和自己的实验结论必须闭卷回答。
+
+### 15.2 核心执行流程
+
+1. 一个prompt从进入vLLM到返回文本，依次经过哪些主要阶段？
+2. Prefill和Decode分别处理什么工作？为什么计算形态不同？
+3. 为什么Decode通常每轮只生成一个token？这会带来什么性能问题？
+4. 为什么多请求合批对Decode的GPU利用率特别重要？
+5. KV cache保存什么？如果没有它，每生成一个token会多做什么？
+6. 怎样根据层数、KV heads、head dimension和dtype估算单token KV字节数？
+7. 为什么GQA/MQA模型必须使用KV heads而不是attention heads估算？
+8. PagedAttention解决什么问题？与操作系统分页的类比在哪里成立？
+
+### 15.3 离线推理、批量与输出对象
+
+9. 创建`LLM`时完成哪些重量级工作？为什么比单次`generate`更重？
+10. `LLM`、`SamplingParams`和`generate`的职责分别是什么？
+11. `outputs[0].outputs[0]`两层索引分别代表什么？`n>1`后怎样变化？
+12. 为什么把20条prompt一次交给引擎比循环创建引擎或逐条调用更合理？
+13. 离线batch、静态batch和continuous batching有什么区别？
+14. 为什么JSONL读写放在不依赖vLLM的`batch_io.py`中？
+
+### 15.4 采样与可复现性
+
+15. `temperature`改变概率分布的什么？为什么0常用于确定性实验？
+16. `top_k`和`top_p`分别限制什么？为什么同一`top_p`保留数量会变？
+17. `max_tokens`、EOS和`finish_reason`有什么关系？怎样判断长度截断？
+18. 固定seed为什么有利于对照？为什么更换版本或并行策略后仍可能不完全一致？
+
+### 15.5 显存、配置与调度
+
+19. 模型加载后显存由哪些部分占用？`gpu_memory_utilization`为何不是KV独占比例？
+20. `max_model_len`、实际prompt、`max_tokens`和并发量怎样影响KV压力？
+21. 请求变长后，`nvidia-smi`中的进程显存为什么不一定线性增长？
+22. 初始化OOM和运行期KV压力有什么区别？分别看什么现象？
+23. OOM或preemption时应按什么顺序调整？为什么不能先随意增大显存比例？
+24. 单张4090为什么必须`tensor_parallel_size=1`？设置2实际要求什么？
+25. 多卡TP有什么收益和通信代价？为什么小模型不应为使用TP而使用TP？
+
+### 15.6 在线服务、指标与排障
+
+26. 离线`LLM.generate()`和OpenAI服务分别适合什么场景？
+27. 请求中的`model="vllm-lab"`为何可以不等于Hugging Face模型路径？
+28. `/health`、`/v1/models`和`/metrics`分别回答什么问题？
+29. running、waiting、KV usage和preemption组合起来说明什么调度状态？
+30. 怎样用并发长请求验证continuous batching和KV block动态占用？
+31. 遇到模块缺失、CUDA不可用、undefined symbol时，怎样分层排查？
+32. 服务已启动但Chat API提示模板错误，为什么base和instruct模型处理不同？
+
+### 15.7 题目、教材与证据对应表
+
+| 题目   | 回读章节   | 最少证据                                            |
+| :----- | :--------- | :-------------------------------------------------- |
+| 1～8   | 第2章      | 手画请求主线；一次KV容量手算                        |
+| 9～14  | 第5～6章   | 基础/批量输出；时间记录；一条非法JSON故障           |
+| 15～18 | 第7章      | 采样参数—输出表；finish reason记录                  |
+| 19～23 | 第4、8章   | 显存四阶段记录；一次KV压力、OOM或preemption复盘     |
+| 24～25 | 第9章      | 单卡TP配置和日志；多卡收益/代价推导                 |
+| 26～32 | 第10～12章 | curl/Python请求；metrics快照；一次服务故障定位      |
+
+### 15.8 通过线与停止线
+
+vLLM入门阶段可以告一段落，需要同时满足：
+
+- 32题中至少26题达到等级2以上。
+- 第1～8、13、19～24、26～31题不能有结构性错误。
+- 至少12题达到等级3，能给出自己的日志、输出或指标。
+- 基础推理、离线batch、采样、KV观察和OpenAI服务全部实际跑通。
+- 保留采样对照、显存/KV实验和故障复盘各一份。
+- 一周后随机抽10题，至少8题仍能闭卷回答。
+
+达到停止线后，不必把所有vLLM参数和源码细节学完。后续优先进行调试、性能实验和简历项目整理；prefix caching、chunked prefill、量化、speculative decoding等根据岗位或实际问题再补。
+
+### 15.9 建议追踪模板
+
+```text
+题号：____
+当前等级：0 / 1 / 2 / 3
+一句话答案：
+关键因果链：
+代码/命令：
+日志/指标证据：
+仍然不会的追问：
+下次复测日期：
+```
+
+每次只学习当前等级最低的3～5题。不要因为某个源码细节没扣完，就暂停整个vLLM学习和项目推进。
+
+## 16. 32道闭卷口试详细答案
+
+使用方式：先独立回答，再对照答案补缺。答案中的“验证”不是可选装饰；只有亲自取得对应日志、输出或指标，才能把该题标为等级3。
+
+### 16.1 一个prompt经过哪些阶段
+
+**标准回答：** 请求首先被tokenizer转换为token ID；引擎接收请求并由scheduler决定何时进入批次；Prefill一次处理输入token并为各层产生初始KV cache；随后Decode按自回归方式逐步生成新token，每一步读取历史KV并追加新KV；采样器根据logits和采样参数选择下一个token；最后detokenizer把token ID转换成文本，由离线对象或OpenAI响应返回。
+
+**为什么这样设计：** Tokenizer负责文本和模型输入之间的转换；scheduler负责共享GPU；Prefill和Decode的工作形态不同；KV cache避免重复计算历史K/V；采样器把概率分布变成实际token。
+
+**怎样验证：** 画出第1章主线；运行基础离线推理，记录模型初始化日志、prompt token数、生成token数和`finish_reason`；再启动服务观察running请求与KV指标。
+
+**常见误区：** 把tokenizer当作GPU模型的一部分；认为`generate`一次调用只对应一个Kernel；忽略scheduler、采样和detokenize的Host工作。
+
+### 16.2 Prefill和Decode有什么不同
+
+**标准回答：** Prefill处理当前请求的全部输入token，通常可以形成较大的矩阵计算，并为每层写入这些token的K/V。Decode依赖前一步结果，每轮通常只处理最新token，读取已有KV并产生下一个token及其K/V。
+
+**性能含义：** Prefill并行度通常更高、计算量更集中；Decode单步工作小、迭代多、串行依赖强，容易受启动开销、KV读取和并行度限制。同一个服务可能同时存在Prefill请求和Decode请求，调度策略需要在吞吐与交互延迟之间取舍。
+
+**验证：** 对比长prompt短输出与短prompt长输出。前者增加Prefill工作，后者增加Decode步数；记录总生成时间、输出token数和服务指标。
+
+### 16.3 为什么Decode通常一次生成一个token
+
+自回归模型把概率写成：
+
+```text
+P(x1, x2, ..., xn) = Π P(xt | x1, ..., x(t-1))
+```
+
+第`t`个token依赖此前已选择的token，因此普通Decode必须先得到`t`，才能计算`t+1`。这造成跨token串行依赖：单请求无法简单同时生成很多未知token。
+
+性能问题包括单步矩阵较小、Kernel launch频繁、每步都要读取历史KV，以及单请求难以填满GPU。Speculative decoding等方法尝试一次验证多个候选token，但不改变普通自回归依赖的基本事实。
+
+### 16.4 为什么多请求合批对Decode重要
+
+一个请求的Decode可能只有一行或很小的矩阵，GPU有大量执行资源闲置。Scheduler把多个请求当前步的token放入同一批，可以把许多“小工作”组合成更大的GPU工作，提高并行度和吞吐。
+
+Continuous batching允许请求完成后立即移出、新请求进入，不必等待原批次最慢请求。这比固定静态batch更适合长短输出混合的在线流量。
+
+代价是请求之间共享资源：批次越大，单步计算可能更高效，但排队、KV容量和单请求延迟也可能增加。因此吞吐最大与延迟最小不是同一个目标。
+
+### 16.5 KV cache保存什么
+
+每一层Attention会把历史token投影成Key和Value。后续token仍需要与所有历史Key计算注意力，并用对应Value求输出。KV cache保存这些历史K/V。
+
+没有KV cache时，第`t`步必须重新对前`t-1`个token计算K/V；有cache后，只计算新token的K/V并追加。它用显存换取大量重复计算的消除。
+
+KV cache不保存所有中间激活，也不直接保存最终生成文本。请求结束后，其KV block可以被回收给其他请求。
+
+### 16.6 怎样估算单token KV字节数
+
+通用估算：
+
+```text
+bytes_per_token
+= 2 × num_layers × num_kv_heads × head_dim × bytes_per_element
+```
+
+`2`代表Key和Value。例：32层、8个KV head、head dimension 128、BF16/FP16每元素2字节：
+
+```text
+2 × 32 × 8 × 128 × 2
+= 131072 bytes
+= 128 KiB/token
+```
+
+4096个存活token约需要512 MiB KV数据。实际引擎还存在block粒度、对齐、元数据和其他内存，因此公式用于数量级估算，不等于`nvidia-smi`增量。
+
+### 16.7 为什么使用KV heads估算GQA/MQA
+
+MHA通常每个Query head拥有独立K/V head；GQA让一组Query heads共享一个K/V head；MQA进一步让大量Query heads共享很少的K/V heads。
+
+KV cache实际存储的是K/V，因此容量与`num_kv_heads`成正比，而不是与Query/attention heads成正比。误用Query head数会高估GQA/MQA的KV容量。
+
+共享减少显存与Decode读取量，但Query head仍需映射到对应KV head，Kernel布局和广播方式也会改变。
+
+### 16.8 PagedAttention解决什么问题
+
+如果每个请求都要求一段足以覆盖最大长度的连续KV空间，会产生预留浪费和碎片。PagedAttention把KV cache切成固定大小物理block，通过block table把逻辑token位置映射到物理block。
+
+类比操作系统分页的部分是“逻辑连续、物理可分散、通过映射访问”；不同之处是这里管理的是GPU上的KV块和Attention访问，不等于CPU虚拟内存的完整缺页、换页和权限系统。
+
+收益是更灵活地增长/回收请求KV、降低碎片并提高并发容量；代价是block table、地址映射和边界管理。PagedAttention减少浪费，不代表KV cache不占显存。
+
+### 16.9 创建LLM为什么很重
+
+`LLM(...)`通常需要读取模型/tokenizer配置、加载权重、初始化执行器和通信环境、规划GPU内存、建立KV cache、选择/编译或预热Kernel，并可能进行CUDA Graph capture。
+
+`generate`是在已初始化引擎上提交请求。若把模型初始化时间混入每条请求，就无法评价稳态推理性能。
+
+验证时分别记录进程启动到LLM可用、第一次generate、后续generate。模型下载、磁盘缓存和首次JIT还应单独标注。
+
+### 16.10 LLM、SamplingParams和generate的职责
+
+- `LLM`：持有tokenizer、模型执行器、GPU内存/KV cache和调度能力。
+- `SamplingParams`：描述输出token选择规则，例如temperature、top_p、top_k、max_tokens和候选数。
+- `generate`：把一个或多个prompt及采样参数提交给已经初始化的引擎，并返回请求结果。
+
+采样参数不负责加载模型；`LLM`配置也不等于某次请求的采样策略。把两类参数分开，有利于同一引擎服务不同请求。
+
+### 16.11 两层outputs索引是什么
+
+`llm.generate([...])`返回`list[RequestOutput]`：外层每项对应一个输入请求。每个`RequestOutput.outputs`又是候选答案列表。
+
+```text
+outputs[request_index].outputs[candidate_index]
+```
+
+默认常只有一个候选，所以使用`[0].outputs[0]`。当`n=3`时，一个请求可有三个候选，应遍历候选列表，不能只读取第一个后声称得到全部结果。
+
+### 16.12 为什么一次提交多条prompt
+
+官方接口会根据内存约束自动批处理传入的prompts。一次提交列表让引擎看到更多可调度工作，并复用同一模型实例。
+
+循环重新创建`LLM`最差，因为反复加载模型和规划显存。循环对同一`LLM`逐条`generate`虽然仍复用模型，但每次可见工作少，调度和并行机会通常低于一次批量提交。
+
+公平比较必须固定prompt集合、采样参数和输出上限，并把模型初始化排除在稳态推理之外。
+
+### 16.13 三种batch有什么区别
+
+- 离线batch：调用前已准备好一组输入，一次提交给本地引擎。
+- 静态batch：一批任务通常一起组成固定批次；长短不一时，资源可能被最长任务拖住。
+- Continuous batching：在线请求持续到达/完成，scheduler每个调度周期动态选择运行集合。
+
+离线一次提交可能内部得到高效批处理，但它不等于真实在线到达、等待和动态替换。验证continuous batching要让请求错开到达并观察running/waiting变化。
+
+### 16.14 为什么分离batch_io
+
+JSON解析、字段校验和结果写盘不需要GPU，也不应该与模型错误混在一起。独立模块可以在无GPU机器上单元测试，并让非法JSON、缺少prompt、结果数量不匹配等问题在进入推理前失败。
+
+这体现“分层调试”：先证明数据层正确，再判断模型/引擎/GPU。否则一次批处理失败时，很难知道是输入格式还是CUDA环境。
+
+### 16.15 Temperature是什么
+
+常见概念式：
+
+```text
+p_i = softmax(logit_i / T)
+```
+
+`T<1`使分布更尖，最高概率token更占优势；`T>1`使分布更平，低概率token更容易被选中。`temperature=0`在接口中通常表示greedy选择，不是直接计算除以0。
+
+Greedy适合确定性抽取和控制变量实验，但“输出稳定”不等于“答案一定正确”。开放创作可使用更高temperature，并通过代表性数据评估。
+
+### 16.16 Top-k和Top-p有什么不同
+
+Top-k只保留概率最高的固定`k`个token；Top-p按概率从高到低累计，保留累计概率达到`p`的最小集合。
+
+如果模型很自信，少数token就能达到`top_p=0.9`；如果分布平坦，需要更多token，因此Top-p候选数量动态变化。二者可以同时使用，最终候选是过滤规则共同作用后的集合。
+
+对照实验一次只改变一个参数，否则无法判断多样性变化来自哪项过滤。
+
+### 16.17 Max tokens、EOS和finish reason
+
+`max_tokens`限制最多生成多少新token，不是输入+输出总长度。模型生成EOS等停止token时可以提前结束；若先达到输出上限，则通常表现为长度原因结束。
+
+应记录`finish_reason`和实际生成token数：EOS结束表示模型认为输出完成；length表示被上限截断。文本看起来“句子结束”不能代替结构化结束原因。
+
+同时还要满足引擎允许的上下文长度：输入token与可能生成token的总量不能违反相关长度约束。
+
+### 16.18 Seed为何不是绝对保证
+
+固定seed让同一环境、同一输入和同一采样路径更容易复现，适合控制变量。但浮点归约顺序、GPU Kernel、并行调度、模型/vLLM版本变化都可能改变很小的logit差异，采样后可能放大成不同token序列。
+
+确定性实验优先使用`temperature=0`；采样实验记录seed和完整环境。Seed是实验条件，不是跨硬件跨版本逐token一致承诺。
+
+### 16.19 模型加载后显存由什么组成
+
+主要包括模型权重、KV cache、运行时激活/临时workspace、CUDA context、编译/图相关缓冲和框架分配器保留内存。
+
+`gpu_memory_utilization`描述当前vLLM实例可使用/预留的整体GPU内存预算，权重、激活和KV cache都在预算关系中；它不是“把该比例全部给KV cache”。权重越大，剩给KV的空间越少。
+
+因此只看一个比例无法推导KV容量，必须结合启动日志中模型、dtype、最大长度和cache信息。
+
+### 16.20 四个长度/并发参数怎样影响KV
+
+- `max_model_len`影响引擎允许和规划的最大序列长度边界。
+- 实际prompt长度决定请求进入Decode前已有多少KV token。
+- `max_tokens`决定该请求最多还能增长多少KV token。
+- 并发请求数决定同时存活序列的token总量。
+
+粗略压力与“所有存活请求的当前token总数”相关。最大长度高不代表每个请求立即占满同等实际KV block，但会影响容量规划、可接受请求和某些初始化资源。
+
+### 16.21 为什么nvidia-smi不线性增长
+
+vLLM可能在初始化时根据预算预留或建立一大片GPU cache，后续请求只是改变内部KV block的已用/空闲状态。框架分配器也可能保留释放后的内存，不立刻归还给驱动。
+
+`nvidia-smi`看到进程级已占显存，不能显示每个KV block的逻辑使用率。因此要结合`/metrics`中的cache usage、running/waiting和preemption。
+
+“显存数字没变”不能推出“KV cache没增长”。
+
+### 16.22 初始化OOM和运行期KV压力
+
+初始化OOM发生在权重加载、内存规划、workspace或图捕获阶段，服务还没正常接收请求。常见现象是启动直接失败、CUDA OOM或无法建立足够cache。
+
+运行期KV压力发生在服务已经启动后，随着长上下文/高并发，cache block不足，请求等待或被preempt/recompute，延迟和吞吐恶化；不一定立即CUDA OOM。
+
+前者看启动日志和其他进程显存；后者看请求负载、cache usage、waiting、preemption和延迟。
+
+### 16.23 OOM或Preemption怎样排查
+
+先确认是哪一类问题：
+
+1. `nvidia-smi`检查其他进程和真实可用显存。
+2. 确认模型/dtype/TP和最大长度是否符合单卡容量。
+3. 启动期因预算过激或缺少余量时，可降低`gpu_memory_utilization`、长度或图相关资源。
+4. 运行期KV不足时，先降低并发、prompt/输出长度或批调度上限；有安全余量时才考虑提高利用率。
+5. 仍不足时换小模型/量化，或在确有多GPU时使用并行。
+
+提高利用率可能增加KV空间、减少preemption，但也可能挤压其他CUDA内存并造成启动/运行OOM，所以不能不分类直接调整。
+
+### 16.24 单卡为什么TP必须为1
+
+`tensor_parallel_size`表示同一模型层跨多少个GPU rank切分，不是单卡内部开几个线程。设置2要求两个可见GPU和两个rank，并需要分布式/NCCL通信。
+
+单卡只有一个设备，设置2会在设备数校验或分布式初始化阶段失败。验证时同时看`CUDA_VISIBLE_DEVICES`、`torch.cuda.device_count()`和启动日志。
+
+### 16.25 多卡TP的收益与代价
+
+TP把大矩阵权重切到多卡，使单卡权重占用下降、可运行更大模型或给KV留下更多空间，并行计算还可能提高吞吐。
+
+代价是层内频繁通信、同步、NCCL初始化、跨卡互联限制和更复杂故障面。模型很小时，单卡已能高效执行，通信可能抵消计算收益。
+
+TP size还要与模型结构的相关维度合理匹配。决策依据应是容量或性能数据，不是“多卡看起来更高级”。
+
+### 16.26 离线和在线服务怎样选
+
+离线`LLM.generate()`适合本地脚本、固定数据集、评测和批处理：生命周期由脚本控制，输入结果容易固化，没有HTTP服务管理成本。
+
+OpenAI服务适合多个客户端持续到达、共享模型、流式输出和观察continuous batching：模型进程长期驻留，存在网络、队列、认证、监控和服务生命周期。
+
+二者底层都使用vLLM引擎，但端到端性能不能直接混比；在线延迟包含HTTP、排队和序列化。
+
+### 16.27 Served model name是什么
+
+`--served-model-name`定义API对外暴露的逻辑模型名。客户端`model="vllm-lab"`是在已启动服务中选择这个逻辑名，不要求等于权重来源路径。
+
+实际权重可以来自Hugging Face ID或本地目录；对外名可以保持稳定，从而把业务接口与部署路径解耦。客户端名称不匹配时，服务应返回模型不存在等错误。
+
+### 16.28 三个端点分别检查什么
+
+- `/health`：服务进程是否达到健康状态，适合存活/就绪检查。
+- `/v1/models`：API是否可访问、认证是否正确、对外模型名是什么。
+- `/metrics`：引擎运行状态和时间序列指标，例如请求、cache和preemption。
+
+端口打开只说明有进程监听；它可能仍在加载、模型未注册、API key错误或引擎内部异常，因此不能替代上述检查。
+
+### 16.29 怎样组合解释服务指标
+
+- running高：当前正在引擎中执行的请求多。
+- waiting升高：请求到达速度超过可调度能力，或受token/KV/批次限制。
+- KV usage高：可用cache余量小。
+- preemption增长：引擎因KV不足让请求让出并可能重算，影响延迟。
+
+例如“waiting上升+KV高+preemption增长”支持KV压力假设；“waiting上升但KV不高”还要检查计算饱和、调度上限或Host/网络。指标要结合请求负载和延迟，不能单独下结论。
+
+### 16.30 怎样验证Continuous Batching
+
+不要一次性发同长度请求后只看返回。更好的实验：
+
+1. 启动服务并持续采集metrics。
+2. 先发几个长输出请求，使它们进入Decode。
+3. 在这些请求未结束时，再发短请求和长prompt请求。
+4. 观察running/waiting、KV usage、完成顺序和每请求延迟。
+5. 记录新请求是否在旧请求全部结束前进入运行/完成。
+
+这能显示动态加入/移出。还应固定模型和采样上限，避免随机输出长度破坏对照。
+
+### 16.31 三类环境错误怎样分层
+
+1. `No module named vllm`：先看`which python`、虚拟环境和`python -m pip -V`，属于Python包/路径层。
+2. CUDA不可用：先看`nvidia-smi`、容器GPU映射、`CUDA_VISIBLE_DEVICES`和PyTorch是否CUDA构建，属于驱动/设备可见性或wheel层。
+3. Undefined symbol/CUDA symbol：包能导入到加载二进制时失败，通常是PyTorch、vLLM、CUDA runtime或C++ ABI不匹配。
+
+使用干净环境和工程固定cu126安装脚本，比在旧环境继续叠加包更可靠。故障记录要保留完整命令、版本和第一条根因错误。
+
+### 16.32 Chat template为什么会失败
+
+Chat Completions接收`role/content`消息，服务必须用chat template把消息序列格式化成模型训练时需要的文本和特殊token。Instruct/chat模型通常在tokenizer配置中提供合适模板；base模型可能没有。
+
+因此服务能加载模型、`/health`正常，并不保证Chat API有可用模板。Base模型可使用Completions接口传入普通prompt，或在理解模型格式后显式提供正确模板。
+
+不能随便复制另一模型模板：特殊token和对话格式不匹配会降低输出质量，即使请求不报错。
+
+### 16.33 答案复测方法
+
+第一次对照答案后，把每题压缩成一张卡片：正面只写题目，背面写“3句核心答案+自己的证据路径”。隔一天、隔一周分别复测。
+
+等级3的答案至少满足：
+
+```text
+概念没有结构性错误
++ 能讲清因果而非只背名词
++ 能给一个本工程命令或代码位置
++ 能给自己的日志/输出/指标
++ 能说明一个边界或误区
+```
+
+如果只能复述本章文字而没有运行证据，仍按等级2记录。
+
+### 16.34 版本相关内容的官方核对入口
+
+本工程固定vLLM `0.10.0+cu126`。当参数或日志与本文不一致时，优先核对同版本资料：
+
+- [vLLM 0.10.0离线推理基础示例](https://docs.vllm.ai/en/v0.10.0/examples/offline_inference/basic.html)
+- [vLLM 0.10.0 Python API与LLM说明](https://docs.vllm.ai/en/v0.10.0/api/vllm/)
+- [vLLM 0.10.0优化、Preemption与并行策略](https://docs.vllm.ai/en/v0.10.0/configuration/optimization.html)
+- [vLLM 0.10.0分布式推理与Tensor Parallel](https://docs.vllm.ai/en/v0.10.0/serving/distributed_serving.html)
+
+不要用其他版本的指标名或默认参数直接覆盖本工程结论；先确认版本，再记录差异。

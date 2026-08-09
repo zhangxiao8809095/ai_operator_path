@@ -5,6 +5,27 @@
 
 namespace {
 
+__global__ void softmax_row_kernel(const float* __restrict__ X,
+                                   float* __restrict__ Y,
+                                   int rows, int cols) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows) return;
+
+    float max_val = -FLT_MAX;
+    for (int col = 0; col < cols; ++col) {
+        max_val = fmaxf(max_val, X[row * cols + col]);
+    }
+
+    float sum_val = 0.0f;
+    for (int col = 0; col < cols; ++col) {
+        sum_val += expf(X[row * cols + col] - max_val);
+    }
+
+    for (int col = 0; col < cols; ++col) {
+        Y[row * cols + col] = expf(X[row * cols + col] - max_val) / sum_val;
+    }
+}
+
 __forceinline__ __device__ float warp_reduce_sum(float val) {
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
         val += __shfl_down_sync(0xffffffff, val, offset);
@@ -198,51 +219,68 @@ __global__ void softmax_online_kernel(const float* __restrict__ X,
 torch::Tensor softmax_row(torch::Tensor X) {
     CHECK_INPUT(X);
     TORCH_CHECK(X.dim() == 2, "X must be 2D [rows, cols]");
+    CHECK_DIM_FITS_INT(X, 0);
+    CHECK_DIM_FITS_INT(X, 1);
+    c10::cuda::CUDAGuard device_guard(X.device());
     int rows = static_cast<int>(X.size(0));
     int cols = static_cast<int>(X.size(1));
     auto Y = torch::empty_like(X);
     if (rows == 0 || cols == 0) return Y;
     int block = 256;
-    softmax_block_reduce_kernel<<<rows, block, block * sizeof(float)>>>(
+    int grid = ceil_div_int(rows, block);
+    softmax_row_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         X.data_ptr<float>(), Y.data_ptr<float>(), rows, cols);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return Y;
 }
 
 torch::Tensor softmax_block_reduce(torch::Tensor X) {
     CHECK_INPUT(X);
     TORCH_CHECK(X.dim() == 2, "X must be 2D [rows, cols]");
+    CHECK_DIM_FITS_INT(X, 0);
+    CHECK_DIM_FITS_INT(X, 1);
+    c10::cuda::CUDAGuard device_guard(X.device());
     int rows = static_cast<int>(X.size(0));
     int cols = static_cast<int>(X.size(1));
     auto Y = torch::empty_like(X);
     if (rows == 0 || cols == 0) return Y;
     int block = 256;
-    softmax_block_reduce_kernel<<<rows, block, block * sizeof(float)>>>(
+    softmax_block_reduce_kernel<<<rows, block, block * sizeof(float), at::cuda::getCurrentCUDAStream()>>>(
         X.data_ptr<float>(), Y.data_ptr<float>(), rows, cols);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return Y;
 }
 
 torch::Tensor softmax_warp_reduce(torch::Tensor X) {
     CHECK_INPUT(X);
     TORCH_CHECK(X.dim() == 2, "X must be 2D [rows, cols]");
+    CHECK_DIM_FITS_INT(X, 0);
+    CHECK_DIM_FITS_INT(X, 1);
+    c10::cuda::CUDAGuard device_guard(X.device());
     int rows = static_cast<int>(X.size(0));
     int cols = static_cast<int>(X.size(1));
     auto Y = torch::empty_like(X);
     if (rows == 0 || cols == 0) return Y;
     int block = 256;
-    softmax_warp_reduce_kernel<<<rows, block, block * sizeof(float)>>>(
+    softmax_warp_reduce_kernel<<<rows, block, block * sizeof(float), at::cuda::getCurrentCUDAStream()>>>(
         X.data_ptr<float>(), Y.data_ptr<float>(), rows, cols);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return Y;
 }
 
 torch::Tensor softmax_online(torch::Tensor X) {
     CHECK_INPUT(X);
     TORCH_CHECK(X.dim() == 2, "X must be 2D [rows, cols]");
+    CHECK_DIM_FITS_INT(X, 0);
+    CHECK_DIM_FITS_INT(X, 1);
+    c10::cuda::CUDAGuard device_guard(X.device());
     int rows = static_cast<int>(X.size(0));
     int cols = static_cast<int>(X.size(1));
     auto Y = torch::empty_like(X);
     if (rows == 0 || cols == 0) return Y;
     int block = 256;
-    softmax_online_kernel<<<rows, block, 64 * sizeof(float)>>>(
+    softmax_online_kernel<<<rows, block, 64 * sizeof(float), at::cuda::getCurrentCUDAStream()>>>(
         X.data_ptr<float>(), Y.data_ptr<float>(), rows, cols);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return Y;
 }

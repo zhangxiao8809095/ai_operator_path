@@ -1,6 +1,6 @@
 import torch
 import aiop4090 as ops
-from bench_ops import cuda_bench
+from bench_ops import cuda_bench, format_stats
 
 shapes = [
     (512, 512, 512),
@@ -25,6 +25,10 @@ for m, n, k in shapes:
         ("wmma_fp16", lambda: ops.gemm_wmma_fp16(a_half, b_half)),
     ]:
         repeat = 10 if m >= 4096 else 30
-        ms = cuda_bench(fn, warmup=5, repeat=repeat)
-        tflops = (2 * m * n * k) / (ms * 1e-3) / 1e12
-        print(f"{m}x{k} @ {k}x{n} {name:10s}: {ms:9.3f} ms {tflops:8.3f} TFLOP/s")
+        stats = cuda_bench(fn, warmup=5, repeat=repeat)
+        median_ms = stats["median"]
+        tflops = (2 * m * n * k) / (median_ms * 1e-3) / 1e12
+        print(
+            f"{m}x{k} @ {k}x{n} {name:10s}: "
+            f"{format_stats(stats)} {tflops:8.3f} TFLOP/s"
+        )

@@ -2,9 +2,10 @@
 build/
 dist/
 *.egg-info/
+.DS_Store
 __pycache__/
+*.py[cod]
 *.so
 *.ncu-rep
 *.nsys-rep
-reports/ncu/*.sqlite
-reports/nsys/*.sqlite
+reports/

@@ -1,0 +1,3090 @@
+# 阶段 2 自学教材：从“会写 CUDA”到“能优化并证明”
+
+> 版本：1.0，自包含教材版。  
+> 前置条件：已经通过阶段1，能够独立完成PyTorch CUDA Extension、Reduction、输入契约、测试和可信计时。  
+> 主案例：GEMM优化链。  
+> 迁移案例：Softmax。  
+> 唯一目标：每一次性能变化都能形成“预测 → 实验 → 指标 → 结论 → 代价”的证据链。
+
+## 教材使用说明
+
+本教材不是优化技巧列表，而是阶段2的完整工作手册。正常情况下，只依靠正文、代码、实验、答案和验收表，就能完成阶段2交付。
+
+正文提供：
+
+- GEMM从naive、shared tiling、register tiling到Tensor Core的完整推导。
+- 不规则shape、低精度、alignment、fallback和多实现调度。
+- NSYS、NCU、Roofline、PTX/SASS和编译报告的最低必要读法。
+- PyTorch/cuBLAS、手写CUDA和Triton的同协议对照。
+- Softmax三遍、片上融合和online状态合并。
+- 正确性测试、shape matrix、benchmark、profiling和性能报告模板。
+- “优化变慢”实验、课后题、答案和阶段2逐项验收表。
+
+只有三类内容需要查询目标环境的官方信息：
+
+1. GPU的精确峰值算力、显存带宽、SM资源和支持的数据类型。
+2. 当前CUDA、PyTorch、Triton和Profiler版本对应的安装/指标名称。
+3. 不同GPU代际的Tensor Core指令与shape约束。
+
+这些是环境参数，不是缺失课程。本教材会说明要查哪个值，以及这个值怎样进入分析。
+
+### 每章的学习循环
+
+```text
+先写性能预测
+    ↓
+只改变一个主要变量
+    ↓
+先过正确性，再做benchmark
+    ↓
+NSYS判断问题在哪一层
+    ↓
+NCU验证Kernel内部假设
+    ↓
+写结论、代价和适用边界
+```
+
+已掌握的章节可以直接做章末闭卷自查和必做实验；两者都通过就记录证据并跳过。不能用“看过类似代码”代替实验结果。
+
+---
+
+## 0. 阶段2完成后，你能承担什么工作
+
+你将能够接手一个真实算子的性能任务：
+
+```text
+收到shape、dtype和性能目标
+  ├─ 定义输入、精度和错误契约
+  ├─ 建立PyTorch/供应商库与朴素基线
+  ├─ 估算FLOPs、bytes和性能上限
+  ├─ 设计线程、warp、CTA和tile映射
+  ├─ 实现多个版本并处理不规则shape
+  ├─ 用NSYS/NCU判断瓶颈和退化原因
+  ├─ 与Triton或CUTLASS做同协议对照
+  └─ 输出可复现的性能报告与回归测试
+```
+
+### 主交付 A：GEMM旗舰项目
+
+实现 `C[M,N] = A[M,K] × B[K,N]`，至少包含：
+
+1. FP32 naive。
+2. FP32 shared-memory tiled。
+3. FP32 register tile 2×2。
+4. register tile 4×4退化或改善对照。
+5. padding和vectorized access受控实验。
+6. FP16 Tensor Core/WMMA，FP32累加。
+7. FP16/BF16 Triton实现，FP32累加。
+8. 非tile整数倍shape的安全路径。
+9. PyTorch/cuBLAS基线、完整shape matrix和性能报告。
+
+### 迁移交付 B：Softmax案例
+
+实现二维Tensor最后一维Softmax，至少包含：
+
+1. PyTorch组合式三遍基线。
+2. 一个block处理一行的片上融合CUDA版本。
+3. online `(m, l)` 状态合并版本或完整推导和验证。
+4. FP32、FP16/BF16输入，FP32统计量。
+5. 短行、长行、非2次幂、mask/scale和极值测试。
+6. 有效GB/s、读写次数和一次NCU分析。
+
+### 完成标准
+
+- **正确**：正常、边界、真实、压力shape和错误输入全部有证据。
+- **可解释**：能从地址和资源推导指标方向，不靠背结论。
+- **可复现**：固定环境、输入、warmup、统计和基线。
+- **能证伪**：优化变慢时至少提出两个竞争假设并逐个排除。
+- **可迁移**：GEMM方法能迁移到Softmax，不是只复述一个教程。
+
+---
+
+## 1. 阶段2总问题树
+
+```text
+一个Kernel为什么快或慢？
+  ├─ 做的工作是否相同？
+  │   ├─ FLOPs是否改变？
+  │   ├─ bytes是否改变？
+  │   └─ 精度、输出和边界是否相同？
+  ├─ GPU是否得到足够工作？
+  │   ├─ grid是否太小？
+  │   ├─ wave tail是否严重？
+  │   └─ shape是否让tile大量浪费？
+  ├─ 数据是否高效到达计算单元？
+  │   ├─ global访问是否合并？
+  │   ├─ 数据是否被shared/register复用？
+  │   ├─ 是否有多余request/sector？
+  │   └─ 是否发生bank conflict或spill？
+  ├─ 计算单元是否高效执行？
+  │   ├─ SIMT还是Tensor Core路径？
+  │   ├─ 指令依赖链是否过长？
+  │   └─ eligible warp是否足够？
+  ├─ 资源是否限制并行度？
+  │   ├─ registers/thread
+  │   ├─ shared memory/block
+  │   └─ threads/block与blocks/SM
+  └─ 测量是否可信？
+      ├─ CPU/launch/sync问题先由NSYS判断
+      ├─ Kernel内部问题由NCU判断
+      └─ 所有结论最终回到Duration
+```
+
+**一句话记忆：先确认工作量相同，再解释硬件如何完成这些工作。**
+
+---
+
+## 2. 最短学习顺序
+
+| 顺序 | 教材模块                      | 立即产出                       | 通过证据                        |
+| :--: | :---------------------------- | :----------------------------- | :------------------------------ |
+| 1    | 性能实验协议与可信基线        | 环境快照、shape matrix、基线表 | 同一输入重复结果稳定            |
+| 2    | GEMM数学、naive映射和性能模型 | naive kernel与手写FLOPs/bytes  | 推导与实测方向一致              |
+| 3    | Shared tiling                 | tiled kernel                   | global读取复用和同步点可解释    |
+| 4    | Register tiling与资源取舍     | 2×2、4×4版本                   | 能解释变快或变慢                |
+| 5    | Padding、向量化与不规则shape  | 三个受控实验和安全fallback     | 快路径和fallback均有测试        |
+| 6    | 低精度与Tensor Core           | FP16 WMMA、BF16/FP16 Triton    | 指令路径、精度和shape约束有证据 |
+| 7    | NSYS、NCU、Roofline和指令验证 | 一份完整Profiler因果报告       | 八步树能落到代码和Duration      |
+| 8    | Triton同协议对照              | 可修改tile/config的实现        | 与CUDA/cuBLAS公平比较           |
+| 9    | Softmax方法迁移               | 第二算子案例                   | 读写、归约、精度和瓶颈闭环      |
+| 10   | 报告、回归与闭卷复测          | 主报告、失败案例、性能回归     | 一周后不看教程仍能重写核心版本  |
+
+建议投入60～90小时。每周8～10小时通常需要8～10周；已经完成过相关实验时，以验收证据为准，不机械服从周数。
+
+---
+
+## 3. 模块1：先建立不会自欺的性能实验
+
+### 3.1 这个模块解决什么问题
+
+你必须先保证不同版本执行的是同一个任务。否则“更快”可能只是少算、低精度、漏边界、隐式转换或错误计时。
+
+### 3.2 GEMM统一契约
+
+阶段2的统一接口：
+
+```text
+输入A：[M,K]，row-major，CUDA contiguous
+输入B：[K,N]，row-major，CUDA contiguous
+输出C：[M,N]
+数学定义：C[m,n] = Σ A[m,k] × B[k,n]
+```
+
+必须明确：
+
+- FP32路径：FP32输入、FP32累加、FP32输出。
+- FP16/BF16路径：低精度输入、FP32累加；输出dtype由接口显式规定。
+- 不支持的stride明确拒绝，不偷偷复制后把复制时间排除。
+- M/N/K为0时定义输出shape和是否launch。
+- 不规则M/N/K必须正确，Tensor Core精确路径不满足条件时安全fallback。
+- 所有版本使用PyTorch当前device和当前stream。
+
+### 3.3 Shape matrix
+
+| 类别       | M    | N     | K     | 为什么必须测             |
+| :--------- | ---: | ----: | ----: | :----------------------- |
+| 小方阵     | 128  | 128   | 128   | launch、并行度和固定开销 |
+| 中方阵     | 1024 | 1024  | 1024  | 基本吞吐比较             |
+| 大方阵     | 4096 | 4096  | 4096  | 计算路径和稳定吞吐       |
+| 小M投影    | 1    | 4096  | 4096  | decode式低并行度         |
+| 长条M      | 128  | 4096  | 4096  | 小batch/prefill边界      |
+| 长条N      | 4096 | 11008 | 4096  | FFN上投影形态            |
+| 长条K      | 4096 | 4096  | 11008 | FFN下投影形态            |
+| 不规则     | 123  | 145   | 67    | M/N/K尾部同时存在        |
+| tile边界前 | 255  | 257   | 511   | 非整除与wave/tile浪费    |
+| 空维度     | 0/1  | 0/1   | 0/1   | API语义和零launch        |
+
+真实GPU显存不足时按比例缩小大shape，但必须保留方阵、小M、长条和不规则四类结构。
+
+### 3.4 基线分层
+
+每个版本至少与三种基线比较：
+
+1. **数学reference**：CPU或高精度小shape，验证定义。
+2. **PyTorch `torch.matmul`**：真实框架基线，通常落到供应商库。
+3. **自己的naive**：解释每一步优化相对什么发生变化。
+
+不能把自己的教学kernel比naive快很多，就宣传为“高性能GEMM”；与cuBLAS差距必须诚实保留。
+
+### 3.5 最小测量协议
+
+固定：GPU、驱动、CUDA、PyTorch、编译参数、shape、dtype、输入seed、时钟/功耗状态、warmup、repeats和同步位置。
+
+报告：median、P90、P95、min/max、有效TFLOP/s；访存算子再报告有效GB/s。
+
+```text
+GEMM FLOPs = 2 × M × N × K
+TFLOP/s = FLOPs / time_seconds / 10^12
+```
+
+这里的TFLOP/s是“按数学有效工作量计算的吞吐”，不是GPU执行的所有指令数。
+
+### 3.6 闭卷自查
+
+- [ ] 所有版本的数学定义、dtype、累加和输出协议相同。
+- [ ] shape matrix同时覆盖真实、边界、不规则和压力输入。
+- [ ] 每次实验只改变一个主要变量，运行前写预测。
+- [ ] 同时保留naive、PyTorch/cuBLAS和当前最佳版本。
+- [ ] 性能报告有统计分布，不用单次最好成绩。
+
+### 3.7 停止线
+
+本阶段不建设跨机器性能数据库，不锁死某个GPU频率作为唯一真相。能保证同一环境中的受控对照可信即可。
+
+---
+
+## 4. 模块2：GEMM数学、Naive映射和性能模型
+
+### 4.1 这个模块解决什么问题
+
+写代码前先回答：每个输出要做多少计算、读多少数据、线程负责什么、理论瓶颈方向是什么。
+
+### 4.2 从数学到地址
+
+```text
+C[M,N] = A[M,K] × B[K,N]
+C[m,n] = Σ(k=0..K-1) A[m,k] × B[k,n]
+```
+
+row-major地址：
+
+```text
+A[m,k]地址偏移 = m × K + k
+B[k,n]地址偏移 = k × N + n
+C[m,n]地址偏移 = m × N + n
+```
+
+Naive映射让一个thread负责一个`C[m,n]`：
+
+```text
+row = blockIdx.y × blockDim.y + threadIdx.y
+col = blockIdx.x × blockDim.x + threadIdx.x
+```
+
+每个有效thread执行：
+
+- K次读取A。
+- K次读取B。
+- K次FMA，按2 FLOPs计为2K FLOPs。
+- 1次写C。
+
+### 4.3 Naive的理论流量
+
+从单个输出thread看，FP32最低代码级流量近似：
+
+```text
+读A：4K bytes
+读B：4K bytes
+写C：4 bytes
+总计：8K + 4 bytes
+算术强度：2K / (8K + 4) ≈ 0.25 FLOPs/byte
+```
+
+这是“没有跨thread cache复用”的朴素上界模型。真实L1/L2会复用部分数据，所以Profiler实测DRAM bytes可能更少；模型的价值是给出假设，不是替代测量。
+
+整个数学问题理想最低DRAM流量是每个A、B只读一次、C只写一次：
+
+```text
+4 × (M×K + K×N + M×N) bytes
+```
+
+naive代码级重复读取与理想最低流量之间的巨大差距，就是tiling要解决的问题。
+
+### 4.4 线程访问模式
+
+同一warp若thread按相邻`col`排列：
+
+- 对固定k，B[k,col]通常是相邻地址，利于合并。
+- 对固定row，不同thread读取相同A[row,k]，可能被cache/broadcast复用。
+- 一个thread内部的K次FMA形成accumulator依赖链。
+
+因此“naive一定完全不合并”是错误说法。它的问题是数据复用依赖cache、每个输出重复读取多、计算与数据搬运比例低。
+
+### 4.5 必做手算
+
+给定`M=N=K=1024`、block为`16×16`：
+
+1. grid维度。
+2. block和thread总数。
+3. 每thread的FMA和FLOPs。
+4. 全部有效数学FLOPs。
+5. naive代码级读取量与理想最低bytes。
+6. 相邻thread读取A/B的地址关系。
+
+答案在第19章。
+
+### 4.6 闭卷自查
+
+- [ ] 能从M/N/K推导索引、FLOPs和最低bytes。
+- [ ] 能区分代码级load、cache请求和DRAM实际bytes。
+- [ ] 能解释naive中A与B各自的warp访问模式。
+- [ ] 能说明为什么先写模型、再用Profiler修正。
+
+### 4.7 停止线
+
+暂不追求精确模拟每级cache命中。阶段2需要的是可验证的一阶模型，不是GPU周期模拟器。
+
+---
+
+## 5. 模块3：Shared-memory Tiling
+
+### 5.1 这个模块解决什么问题
+
+让一个block协作加载A/B tile，复用片上数据，减少多个输出thread对global memory的重复读取。
+
+### 5.2 CTA tile映射
+
+以`TILE=16`为例：
+
+```text
+一个block：16×16 = 256 threads
+一个block输出：C的16×16 tile
+每个thread输出：C tile中的1个元素
+K维：每次处理16，循环ceil(K/16)次
+```
+
+每个K tile：
+
+1. 256个thread协作加载A的16×16 tile。
+2. 协作加载B的16×16 tile。
+3. block barrier，保证数据到shared。
+4. 每thread使用shared中的一行A和一列B做16次FMA。
+5. block barrier，保证所有thread用完旧tile再覆盖shared。
+
+### 5.3 全局读取减少倍数
+
+在一个16×16输出tile、一个K分块中：
+
+```text
+naive：256个输出 × (16个A + 16个B) = 8192个元素读取
+tiled：A tile 256 + B tile 256 = 512个元素读取
+理论代码级读取减少：8192 / 512 = 16倍
+```
+
+减少的是重复global load指令/请求机会；实际DRAM减少倍数受cache影响，不能直接声称也是16倍。
+
+### 5.4 为什么有两个barrier
+
+- 第一个barrier保护“shared写完后再读”。
+- 第二个barrier保护“所有thread读完后再被下一轮覆盖”。
+
+边界thread不能在barrier前return。越界元素应向shared写0作为乘加identity，然后所有thread共同到达barrier。
+
+### 5.5 Shared占用和bank
+
+两个`16×16 FP32` tile：
+
+```text
+shared/block = 2 × 16 × 16 × 4 = 2048 bytes
+```
+
+bank conflict必须根据真实访问方向判断。`As[ty][k]`与`Bs[k][tx]`可能包含广播或连续访问；盲目给所有二维数组加`+1` padding，可能只增加shared占用而没有收益。
+
+### 5.6 Tile选择
+
+tile增大可能：
+
+- 提高复用、减少K循环和barrier次数。
+- 增加threads/block或每thread工作。
+- 增加shared和register。
+- 增加M/N尾部浪费。
+- 降低blocks/SM或让小shape并行度不足。
+
+因此tile不是越大越好。阶段2至少比较8、16、32中的两个合法设计，但每个版本必须保持其他主要变量尽量一致。
+
+### 5.7 必做实验
+
+比较naive与TILE16：
+
+1. 运行前计算理论global读取变化、shared用量和barrier次数。
+2. 正确性覆盖K=15/16/17与M/N尾部。
+3. Benchmark方阵、小M和不规则shape。
+4. NCU比较Duration、global requests/sectors、DRAM bytes、shared、occupancy和stall。
+5. 写出“模型正确的部分”和“被cache/硬件修正的部分”。
+
+### 5.8 闭卷自查
+
+- [ ] 能画出CTA tile、thread输出和K tile循环。
+- [ ] 能推导global读取减少倍数，而不是背“shared更快”。
+- [ ] 能解释两个barrier分别保护什么。
+- [ ] 能处理M/N/K非tile整数倍。
+- [ ] 能根据地址判断padding是否可能有效。
+
+### 5.9 停止线
+
+暂不学习异步拷贝、TMA和复杂swizzle。先把同步版tiled GEMM的复用模型与实测因果做扎实。
+
+---
+
+## 6. 模块4：Register Tiling与资源取舍
+
+### 6.1 这个模块解决什么问题
+
+Shared tiling后，A/B已在片上，但每个thread只计算一个输出，仍会重复从shared读取。Register tiling让每个thread计算多个输出，复用刚读入的A/B值。
+
+### 6.2 2×2 thread tile
+
+```text
+一个thread输出2×2 = 4个C元素
+需要4个FP32 accumulator
+每个K步读取2个A值和2个B值
+完成4次FMA
+```
+
+如果4个输出分别由4个thread计算，每个K步合计需要8个shared值；合并到一个thread后只需4个，shared读取复用提高。
+
+代价：
+
+- accumulator从1个增加到4个。
+- 临时A/B值增加。
+- 地址和边界逻辑增加。
+- registers/thread上升，可能减少blocks/SM。
+- 一个thread tile覆盖更大输出，grid block数减少，小shape可能不够并行。
+
+### 6.3 4×4为什么可能更慢
+
+4×4每thread有16个accumulator，还需要A/B临时数组。它可能提高shared复用，也可能：
+
+1. registers/thread显著增加。
+2. blocks/SM下降。
+3. eligible warps减少，延迟隐藏变差。
+4. 出现spill/local memory。
+5. grid过小或尾部浪费增加。
+6. 指令依赖和地址计算增加。
+
+不能看到register增加就直接判定根因。必须同时检查register、spill、occupancy、active/eligible warps、stall、grid规模和Duration。
+
+### 6.4 竞争假设实验
+
+若4×4慢于2×2，至少提出：
+
+- H1：寄存器压力降低了blocks/SM和eligible warps。
+- H2：没有spill，真正原因是grid block数减少导致wave利用差。
+- H3：不规则shape让4×4 tile浪费更多计算和分支。
+- H4：shared访问或指令依赖变差。
+
+逐次只改变shape、thread tile或编译寄存器限制中的一个变量。最后必须能排除至少一个看似合理但错误的假设。
+
+### 6.5 必做实验
+
+1. 实现2×2和4×4，保持K tile相同。
+2. 编译时加入`--ptxas-options=-v`记录register和spill。
+3. 对方阵、小M、不规则shape比较grid、waves和Duration。
+4. NCU观察occupancy、eligible warps、主要stall和local memory。
+5. 不论4×4快慢，都写出适用shape和代价。
+
+### 6.6 闭卷自查
+
+- [ ] 能推导thread tile怎样减少shared读取。
+- [ ] 能画出CTA tile、thread tile和输出地址。
+- [ ] 能从register变化推到blocks/SM，但不把occupancy当结论。
+- [ ] 优化变慢时能提出竞争假设和最小实验。
+
+### 6.7 停止线
+
+阶段2不要求手写达到cuBLAS级warp-specialized pipeline。2×2/4×4足以训练资源权衡和反直觉分析。
+
+---
+
+## 7. 模块5：Padding、Vectorization与不规则Shape
+
+### 7.1 Padding
+
+Padding只在真实访问发生bank conflict时有意义。常见32 banks、4-byte模型：
+
+```text
+bank = (byte_address / 4) % 32
+```
+
+若warp沿二维数组的列访问，leading dimension为32时可能全部落到同一bank；改成33可让bank轮转。若访问本来是连续行或同地址广播，padding可能没有收益。
+
+必做：对tiled与tiled+padding使用完全相同的映射，先手算bank，再比较shared conflict绝对量与Duration。允许结论是“padding无效”，但必须说明为什么。
+
+### 7.2 Vectorized access
+
+`float4`/`half2`可能减少load/store指令并扩大单指令搬运宽度，但不会自动减少数学bytes。
+
+快路径条件：
+
+- 基地址满足类型alignment。
+- 每行leading dimension保证后续行仍对齐。
+- 向量覆盖范围不越界。
+- 尾部有标量或masked fallback。
+- 输出地址也满足store alignment。
+
+必须比较：指令数、requests、sectors、实际bytes和Duration。若只把4个scalar load换成一个vector load，但瓶颈在别处，时间可以不变。
+
+### 7.3 不规则Shape策略
+
+三种常见方案：
+
+1. kernel内逐元素mask：通用，分支和无效工作较多。
+2. 主体tile + tail kernel：快路径干净，代码和launch增加。
+3. 多实现调度：整齐shape用专用快路径，其余走通用fallback。
+
+阶段2至少实现第3种思想：WMMA只处理满足约束的shape；其余明确进入通用路径。不能越界，也不能静默改变dtype。
+
+### 7.4 Shape浪费率
+
+对输出tile `TM×TN`：
+
+```text
+launched_output_slots
+= ceil(M/TM) × TM × ceil(N/TN) × TN
+
+有效利用率
+= M × N / launched_output_slots
+```
+
+K维还要乘上`K / (ceil(K/TK)×TK)`的有效比例。小M、奇数维度和tile边界附近必须计算浪费率。
+
+### 7.5 闭卷自查
+
+- [ ] 能从地址公式判断padding是否必要。
+- [ ] 能解释vectorization改变的是指令、请求还是bytes。
+- [ ] 能设计alignment检查和tail fallback。
+- [ ] 能计算不规则shape的tile有效利用率。
+- [ ] 多实现调度不会静默改变输入、输出和精度契约。
+
+---
+
+## 8. 模块6：低精度、Tensor Core和WMMA
+
+### 8.1 这个模块解决什么问题
+
+理解低精度输入怎样进入Tensor Core、为什么累加通常使用FP32、shape/layout为何受限，以及怎样证明实际生成了MMA指令。
+
+### 8.2 三层tile
+
+```text
+CTA tile：一个block负责的C区域
+  └─ warp tile：一个warp负责的子区域
+      └─ MMA tile：一条或一组Tensor Core指令的矩阵形状
+```
+
+WMMA常用教学形态是`m16n16k16`：一个warp协作完成16×16输出tile的一次K=16矩阵乘加。fragment是warp协作持有的逻辑矩阵片段，元素具体分散在哪个lane由实现规定，不能把它当普通每thread数组解释。
+
+### 8.3 数据类型
+
+- FP16输入 + FP32 accumulator：范围和累加误差通常优于FP16累加。
+- BF16输入 + FP32 accumulator：动态范围接近FP32，精度低于FP16。
+- TF32：通常用于FP32输入的Tensor Core内部计算路径，不是普通Tensor存储dtype。
+- 输出FP16/BF16会再发生一次舍入；输出FP32占用更多带宽。
+
+阶段2的WMMA参考实现使用FP16输入、FP32输出。BF16通过Triton `tl.dot`路径完成，并用Profiler确认Tensor Core/MMA指令；低层BF16 WMMA接口随架构和工具链差异较大，不作为第一份手写实现的必选项。
+
+### 8.4 Layout和leading dimension
+
+WMMA fragment声明A/B是row-major或col-major；`load_matrix_sync`的leading dimension必须与实际内存布局一致。layout声明错时，结果可能像“随机数”，但根因不是精度。
+
+所有参与warp的lane必须以一致控制流执行WMMA操作。M/N/K不满足tile约束时，不能让warp中部分lane跳过MMA；应由launcher路由到fallback。
+
+### 8.5 怎样证明用了Tensor Core
+
+证据强度从弱到强：
+
+1. 代码调用WMMA或`tl.dot`：只是意图。
+2. 编译报告和NCU Tensor Core相关吞吐：支持证据。
+3. SASS/PTX中出现对应MMA/HMMA指令：直接路径证据。
+4. 与SIMT FP32版本的受控性能和精度差异：结果证据。
+
+不能只因FP16版本更快就断言使用了Tensor Core；更少bytes本身也可能带来收益。
+
+### 8.6 安全fallback
+
+```text
+if dtype、layout、alignment、M/N/K约束全部满足：
+    走WMMA/Tensor Core快路径
+else：
+    走通用CUDA或供应商库fallback
+```
+
+报告必须把fallback转换、额外分配和launch算入端到端时间；如果只比较核心kernel，要单独标注不含哪些成本。
+
+### 8.7 闭卷自查
+
+- [ ] 能画出CTA/warp/MMA tile层级。
+- [ ] 能解释fragment、layout、leading dimension和warp一致执行。
+- [ ] 能说明FP16/BF16/TF32的存储、累加和误差差异。
+- [ ] 能用指令或Profiler证据确认Tensor Core路径。
+- [ ] 非整齐shape有安全fallback并计入成本。
+
+---
+
+## 9. 模块7：NSYS、NCU、Roofline和指令验证
+
+### 9.1 工具分工
+
+| 工具          | 回答的问题                                             | 不应直接回答的问题               |
+| :------------ | :----------------------------------------------------- | :------------------------------- |
+| CPU wall time | Python到GPU完成的端到端延迟                            | 单个Kernel内部瓶颈               |
+| CUDA Event    | 同stream上GPU elapsed time                             | CPU gap和跨进程服务延迟          |
+| NSYS          | 时间线、CPU gap、launch、同步、拷贝、Kernel排列        | 单个Kernel具体stall根因          |
+| NCU           | Kernel资源、访存、scheduler、stall、Roofline和源码热点 | 完整请求链路和多Kernel空隙       |
+| 编译报告      | registers、shared、stack和spill                        | 这些资源是否真的导致Duration变化 |
+| PTX/SASS      | vector、MMA、load/store等指令路径                      | 指令为何一定是最终瓶颈           |
+
+### 9.2 先用NSYS分层
+
+先判断时间花在：
+
+- Python/C++准备。
+- dtype转换或临时分配。
+- Kernel launch gap。
+- H2D/D2H拷贝。
+- 强制同步。
+- 目标Kernel本身。
+
+如果小shape主要受launch影响，直接优化Kernel内部可能对端到端几乎没有收益。
+
+### 9.3 NCU八步问题树
+
+固定顺序：
+
+```text
+1. Duration
+2. Launch Stats
+3. SM vs Memory方向
+4. DRAM/L2/L1/shared绝对bytes、requests、sectors
+5. Occupancy和资源限制
+6. Scheduler与eligible warps
+7. Stall与源码/指令位置
+8. Roofline作为宏观交叉检查，再回到Duration
+```
+
+注意：Roofline不是自动给根因的最终裁判；先确认FLOPs、bytes、dtype和内存层级选对。
+
+### 9.4 怎样读stall
+
+先问scheduler是否经常没有eligible warp。只有issue slot明显空闲时，stall分类才值得成为主线。
+
+- long scoreboard常与较长延迟数据依赖有关，但要回到对应load和cache层级。
+- short scoreboard可能与较短延迟依赖/shared操作有关。
+- barrier提示warp在等同步，但可能是负载不均而非barrier指令本身“慢”。
+- math pipe throttle提示某计算管线饱和，但要确认执行的是有效工作还是尾部浪费。
+- not selected不自动代表问题，可能只是有其他eligible warp被选中。
+
+### 9.5 Throughput与总工作量
+
+百分比上升不代表有效工作增加。例如DRAM throughput提高，可能因为：
+
+- 时间缩短、bytes相同，这是好事。
+- 实际bytes增加、时间相同，这可能是退化。
+- cache命中变化导致流量层级转移。
+
+每次同时看百分比、绝对bytes、requests/sectors和Duration。
+
+### 9.6 Roofline
+
+```text
+Arithmetic Intensity = 有效FLOPs / 选定内存层级bytes
+Ridge Point = 峰值FLOP/s / 峰值bandwidth
+```
+
+点位于ridge左侧通常偏带宽限制，右侧通常偏计算限制。但实际实现还可能低于roofline很多，原因包括并行度、指令依赖、资源、launch和非理想访问。
+
+### 9.7 因果报告句式
+
+```text
+变化：2×2改成4×4，每thread输出从4增到16
+预测：shared读取复用提高，但register和tile浪费增加
+证据：register X→Y，blocks/SM A→B，eligible warp下降；无spill
+排除：DRAM bytes基本不变，不支持“global流量增加”假设
+结果：方阵快P%，小M慢Q%
+结论：4×4收益依赖足够grid与规则shape，退化主因是并行度/资源而非spill
+代价：更复杂边界和更窄适用范围
+```
+
+### 9.8 闭卷自查
+
+- [ ] 先用NSYS判断层级，再用NCU分析Kernel。
+- [ ] NCU按八步顺序，不从某个百分比直接跳结论。
+- [ ] stall与eligible warp、源码和资源联动。
+- [ ] Roofline中的FLOPs、bytes、dtype和层级有明确定义。
+- [ ] 所有结论最终回到Duration和正确性。
+
+---
+
+## 10. 模块8：Triton/CUTLASS分层与同协议对照
+
+### 10.1 为什么阶段2要学一个主流栈
+
+手写CUDA训练硬件映射；Triton/CUTLASS展示工业开发中怎样用更高抽象复用调度、tile和Tensor Core能力。目标不是多学一个语法，而是比较：
+
+- 开发效率。
+- 控制粒度。
+- 可移植性。
+- 自动调优能力。
+- 对特殊融合和不规则shape的适应性。
+
+### 10.2 分层
+
+```text
+PyTorch / torch.compile
+    ↓ 图与算子层
+Triton
+    ↓ program、block pointer、tl.dot，编译器生成GPU代码
+CUTLASS / CuTe
+    ↓ C++模板、layout algebra、copy/MMA atom、GEMM hierarchy
+CUDA C++ / WMMA
+    ↓ thread/warp/shared/register与较直接硬件控制
+PTX / SASS
+    ↓ 指令层
+```
+
+阶段2选择Triton完成一条非教程式实现：必须修改tile/config或调度，并使用自己的shape matrix、容差和统计协议。CUTLASS只要求理解定位，不同时展开两套大型API。
+
+### 10.3 公平对照
+
+- 相同A/B、shape、dtype和输出dtype。
+- 相同累加精度和容差。
+- 相同warmup/repeats与计时器。
+- 说明是否包含编译、autotune、dtype转换和临时分配。
+- 首次JIT时间与稳态执行时间分开。
+- cuBLAS、Triton和手写CUDA都保留，不挑选有利shape隐藏失败。
+
+### 10.4 闭卷自查
+
+- [ ] 能解释Triton、CUTLASS/CuTe、WMMA和CUDA C++的抽象层次。
+- [ ] Triton实现不是原样照抄，能修改BLOCK_M/N/K、num_warps或grouping。
+- [ ] JIT/autotune成本与稳态时间分开。
+- [ ] 所有实现使用同一协议并诚实解释差距。
+
+---
+
+## 11. 模块9：把方法迁移到Softmax
+
+### 11.1 为什么选择Softmax
+
+Softmax包含数值稳定、两次reduction、指数、读写融合和长短行映射，能验证你是否真正掌握访存、同步、精度和性能模型。
+
+### 11.2 数学定义
+
+```text
+m = max(x)
+l = Σ exp(x_i - m)
+y_i = exp(x_i - m) / l
+```
+
+减去max避免指数溢出，不改变数学结果。
+
+### 11.3 三种实现
+
+#### PyTorch组合式三遍
+
+`max → subtract/exp → sum → divide`由多个算子组成，中间Tensor写回global memory并产生多个launch。它是数学基线，不是理想性能实现。
+
+#### 一个block一行的片上融合
+
+把一行加载到shared/register，block内完成max和sum，再写输出。理论上可接近“读输入一次、写输出一次”，但一行必须适合片上资源；长行可能受shared/register和并行度限制。
+
+#### Online状态合并
+
+对一段数据维护：
+
+```text
+m = 当前最大值
+l = Σ exp(x_i - m)
+```
+
+合并两段`(m1,l1)`和`(m2,l2)`：
+
+```text
+m = max(m1, m2)
+l = l1 × exp(m1-m) + l2 × exp(m2-m)
+```
+
+它允许不同thread/warp独立处理分块后再归约状态。最终输出仍需知道全局m/l，因此普通Softmax至少还要再读一次x；它把统计量计算合并为一遍，并为FlashAttention式分块状态更新打基础。
+
+### 11.4 读写模型
+
+对`rows×cols`：
+
+- 组合式PyTorch会多次读写中间Tensor，实际由框架融合情况决定。
+- 三次global循环的单kernel：读x三次、写y一次。
+- online统计+输出：读x两次、写y一次。
+- 整行片上缓存：理想读x一次、写y一次，但受片上容量限制。
+
+有效GB/s常按最低必要流量计算：
+
+```text
+effective_GB/s
+= (input_bytes + output_bytes) / time_seconds / 1e9
+```
+
+必须标注这是“有效流量”，不等于Profiler观测到的实际DRAM bytes。
+
+### 11.5 映射选择
+
+- 很短行：一个warp一行，减少barrier和闲置。
+- 中等行：一个block一行，多个warp合作归约。
+- 很长行：thread循环、多个block/分阶段或更复杂持久化设计。
+- rows很少：grid不足，单行再快也可能无法占满GPU。
+
+边界不是固定数字，由dtype、cols、寄存器、shared、GPU和实现共同决定；必须通过shape sweep确定。
+
+### 11.6 融合
+
+Attention中常见：
+
+```text
+softmax(scale × score + mask)
+```
+
+若scale和mask在Softmax kernel中直接应用，可减少中间Tensor读写和launch。收益来自消除数据搬运/launch，不是减少Softmax数学定义。Causal或无效token的mask值应等价于负无穷，并正确处理整行全mask语义。
+
+### 11.7 必做实验
+
+1. FP32/FP16/BF16，统计用FP32。
+2. cols=1/31/32/33/127/128/129/1024/4097。
+3. rows=1/32/1024/4096，观察并行度。
+4. 极大正负数、全相等、NaN/Inf和全mask。
+5. 比较PyTorch、CUDA融合和online版本的有效GB/s。
+6. NCU判断是DRAM、片上资源、并行度、指数吞吐还是launch限制。
+
+### 11.8 闭卷自查
+
+- [ ] 能推导max trick和online `(m,l)` 合并公式。
+- [ ] 能估算三种实现的读写次数。
+- [ ] 能根据rows/cols选择warp或block映射并验证边界。
+- [ ] 能说明mask/scale融合减少什么，没有减少什么。
+- [ ] 能区分有效GB/s与实际DRAM bytes。
+
+---
+
+## 12. 阶段2配套工程结构
+
+阶段1工程继续保留，新建独立目录：
+
+```text
+stage2_kernel_lab/
+  ├─ setup.py
+  ├─ src/
+  │   ├─ bindings.cpp
+  │   ├─ gemm.cu
+  │   └─ softmax.cu
+  ├─ python/
+  │   └─ triton_gemm.py
+  ├─ tests/
+  │   ├─ test_gemm.py
+  │   └─ test_softmax.py
+  ├─ benchmark/
+  │   ├─ bench_gemm.py
+  │   ├─ bench_softmax.py
+  │   └─ profile_entry.py
+  ├─ reports/
+  │   ├─ environment.md
+  │   ├─ version_results.csv
+  │   ├─ ncu/
+  │   └─ nsys/
+  └─ README.md
+```
+
+> 验证边界：当前文档编写环境没有安装PyTorch/CUDA，后续参考代码只完成静态结构检查，尚未在本机实际编译。第一次在目标GPU服务器运行时，必须记录编译器、GPU、软件版本、测试结果和必要修正。
+
+后续章节给出参考实现。第一次可以跟写；最终验收时必须关闭参考代码，从空文件独立写出naive、tiled和regtile2x2核心版本。
+
+---
+
+## 13. 构建与绑定
+
+### 13.1 `setup.py`
+
+```python
+from setuptools import setup
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+
+setup(
+    name="stage2_kernel_lab",
+    ext_modules=[
+        CUDAExtension(
+            name="stage2_kernel_lab",
+            sources=[
+                "src/bindings.cpp",
+                "src/gemm.cu",
+                "src/softmax.cu",
+            ],
+            extra_compile_args={
+                "cxx": ["-O3"],
+                "nvcc": [
+                    "-O3",
+                    "-lineinfo",
+                    "--ptxas-options=-v",
+                ],
+            },
+        )
+    ],
+    cmdclass={"build_ext": BuildExtension},
+)
+```
+
+这里不启用`--use_fast_math`。先建立默认数学路径；以后单独增加fast-math版本，才能把指数近似、FMA、精度和性能作为受控变量比较。
+
+### 13.2 `src/bindings.cpp`
+
+```cpp
+#include <torch/extension.h>
+
+
+torch::Tensor gemm_naive(torch::Tensor a, torch::Tensor b);
+torch::Tensor gemm_tiled(torch::Tensor a, torch::Tensor b);
+torch::Tensor gemm_tiled_padding(torch::Tensor a, torch::Tensor b);
+torch::Tensor gemm_regtile2x2(torch::Tensor a, torch::Tensor b);
+torch::Tensor gemm_regtile4x4(torch::Tensor a, torch::Tensor b);
+torch::Tensor gemm_float4(torch::Tensor a, torch::Tensor b);
+torch::Tensor gemm_wmma_fp16(torch::Tensor a, torch::Tensor b);
+
+torch::Tensor softmax_fused(torch::Tensor x);
+torch::Tensor softmax_online(torch::Tensor x);
+
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gemm_naive", &gemm_naive);
+    m.def("gemm_tiled", &gemm_tiled);
+    m.def("gemm_tiled_padding", &gemm_tiled_padding);
+    m.def("gemm_regtile2x2", &gemm_regtile2x2);
+    m.def("gemm_regtile4x4", &gemm_regtile4x4);
+    m.def("gemm_float4", &gemm_float4);
+    m.def("gemm_wmma_fp16", &gemm_wmma_fp16);
+    m.def("softmax_fused", &softmax_fused);
+    m.def("softmax_online", &softmax_online);
+}
+```
+
+阶段2仍使用简单pybind连接完整调用链。Dispatcher、autograd、FakeTensor和`torch.compile`注册属于阶段3的生产级集成，不在此处混入性能核心实验。
+
+---
+
+## 14. GEMM完整参考实现 `src/gemm.cu`
+
+下面代码强调“版本之间只有明确变化”。所有FP32手写版本共享相同输入契约、stream和错误处理。
+
+```cpp
+#include <torch/extension.h>
+
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
+
+#include <cuda.h>
+#include <cuda_fp16.h>
+#include <cuda_runtime.h>
+#include <mma.h>
+
+#include <cstdint>
+#include <limits>
+
+
+namespace {
+
+using namespace nvcuda;
+
+
+struct GemmProblem {
+    int m;
+    int n;
+    int k;
+};
+
+
+GemmProblem check_base(
+    const torch::Tensor& a,
+    const torch::Tensor& b) {
+    TORCH_CHECK(a.is_cuda() && b.is_cuda(),
+                "a and b must be CUDA tensors");
+    TORCH_CHECK(a.device() == b.device(),
+                "a and b must be on the same device");
+    TORCH_CHECK(a.is_contiguous() && b.is_contiguous(),
+                "a and b must be contiguous row-major tensors");
+    TORCH_CHECK(a.dim() == 2 && b.dim() == 2,
+                "a and b must be 2D");
+    TORCH_CHECK(a.size(1) == b.size(0),
+                "a.shape[1] must equal b.shape[0]");
+
+    int64_t m64 = a.size(0);
+    int64_t k64 = a.size(1);
+    int64_t n64 = b.size(1);
+    int64_t limit = std::numeric_limits<int>::max();
+    TORCH_CHECK(m64 <= limit && n64 <= limit && k64 <= limit,
+                "stage2 reference supports dimensions up to INT_MAX");
+
+    return {
+        static_cast<int>(m64),
+        static_cast<int>(n64),
+        static_cast<int>(k64),
+    };
+}
+
+
+GemmProblem check_fp32(
+    const torch::Tensor& a,
+    const torch::Tensor& b) {
+    GemmProblem p = check_base(a, b);
+    TORCH_CHECK(a.scalar_type() == at::kFloat &&
+                b.scalar_type() == at::kFloat,
+                "this path requires float32 inputs");
+    return p;
+}
+
+
+torch::Tensor make_fp32_output(
+    const torch::Tensor& a,
+    const GemmProblem& p) {
+    return torch::empty({p.m, p.n}, a.options().dtype(at::kFloat));
+}
+
+
+bool handle_empty_or_zero_k(
+    torch::Tensor& out,
+    const GemmProblem& p) {
+    if (p.m == 0 || p.n == 0) {
+        return true;
+    }
+    if (p.k == 0) {
+        out.zero_();
+        return true;
+    }
+    return false;
+}
+
+
+__global__ void gemm_naive_kernel(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    int m,
+    int n,
+    int k_size) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < m && col < n) {
+        float acc = 0.0f;
+        for (int k = 0; k < k_size; ++k) {
+            acc += a[row * k_size + k] * b[k * n + col];
+        }
+        c[row * n + col] = acc;
+    }
+}
+
+
+constexpr int TILE = 16;
+
+
+template <int PAD>
+__global__ void gemm_tiled_kernel(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    int m,
+    int n,
+    int k_size) {
+    __shared__ float a_tile[TILE][TILE + PAD];
+    __shared__ float b_tile[TILE][TILE + PAD];
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int row = blockIdx.y * TILE + ty;
+    int col = blockIdx.x * TILE + tx;
+    float acc = 0.0f;
+
+    for (int k0 = 0; k0 < k_size; k0 += TILE) {
+        int a_col = k0 + tx;
+        int b_row = k0 + ty;
+
+        a_tile[ty][tx] =
+            (row < m && a_col < k_size)
+                ? a[row * k_size + a_col]
+                : 0.0f;
+        b_tile[ty][tx] =
+            (b_row < k_size && col < n)
+                ? b[b_row * n + col]
+                : 0.0f;
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k = 0; k < TILE; ++k) {
+            acc += a_tile[ty][k] * b_tile[k][tx];
+        }
+
+        __syncthreads();
+    }
+
+    if (row < m && col < n) {
+        c[row * n + col] = acc;
+    }
+}
+
+
+template <int RM, int RN>
+__global__ void gemm_regtile_kernel(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    int m,
+    int n,
+    int k_size) {
+    __shared__ float a_tile[TILE * RM][TILE];
+    __shared__ float b_tile[TILE][TILE * RN];
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int base_row = blockIdx.y * (TILE * RM) + ty * RM;
+    int base_col = blockIdx.x * (TILE * RN) + tx * RN;
+
+    float acc[RM][RN] = {};
+
+    for (int k0 = 0; k0 < k_size; k0 += TILE) {
+        #pragma unroll
+        for (int r = 0; r < RM; ++r) {
+            int row = base_row + r;
+            int col = k0 + tx;
+            a_tile[ty * RM + r][tx] =
+                (row < m && col < k_size)
+                    ? a[row * k_size + col]
+                    : 0.0f;
+        }
+
+        #pragma unroll
+        for (int col_offset = 0; col_offset < RN; ++col_offset) {
+            int row = k0 + ty;
+            int col = base_col + col_offset;
+            b_tile[ty][tx * RN + col_offset] =
+                (row < k_size && col < n)
+                    ? b[row * n + col]
+                    : 0.0f;
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k = 0; k < TILE; ++k) {
+            float a_values[RM];
+            float b_values[RN];
+
+            #pragma unroll
+            for (int r = 0; r < RM; ++r) {
+                a_values[r] = a_tile[ty * RM + r][k];
+            }
+            #pragma unroll
+            for (int col_offset = 0; col_offset < RN; ++col_offset) {
+                b_values[col_offset] = b_tile[k][tx * RN + col_offset];
+            }
+
+            #pragma unroll
+            for (int r = 0; r < RM; ++r) {
+                #pragma unroll
+                for (int col_offset = 0; col_offset < RN; ++col_offset) {
+                    acc[r][col_offset] +=
+                        a_values[r] * b_values[col_offset];
+                }
+            }
+        }
+
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int r = 0; r < RM; ++r) {
+        #pragma unroll
+        for (int col_offset = 0; col_offset < RN; ++col_offset) {
+            int row = base_row + r;
+            int col = base_col + col_offset;
+            if (row < m && col < n) {
+                c[row * n + col] = acc[r][col_offset];
+            }
+        }
+    }
+}
+
+
+__global__ void gemm_float4_kernel(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    int m,
+    int n,
+    int k_size) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int vector_col = blockIdx.x * blockDim.x + threadIdx.x;
+    int base_col = vector_col * 4;
+
+    if (row >= m || base_col >= n) {
+        return;
+    }
+
+    float4 acc = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    for (int k = 0; k < k_size; ++k) {
+        float a_value = a[row * k_size + k];
+        const float4* b4 = reinterpret_cast<const float4*>(
+            b + k * n + base_col);
+        float4 b_value = b4[0];
+        acc.x += a_value * b_value.x;
+        acc.y += a_value * b_value.y;
+        acc.z += a_value * b_value.z;
+        acc.w += a_value * b_value.w;
+    }
+
+    float4* c4 = reinterpret_cast<float4*>(c + row * n + base_col);
+    c4[0] = acc;
+}
+
+
+constexpr int WMMA_M = 16;
+constexpr int WMMA_N = 16;
+constexpr int WMMA_K = 16;
+constexpr int WMMA_WARPS_PER_BLOCK = 4;
+
+
+__global__ void gemm_wmma_fp16_kernel(
+    const half* __restrict__ a,
+    const half* __restrict__ b,
+    float* __restrict__ c,
+    int m,
+    int n,
+    int k_size) {
+    int warp_id = threadIdx.y;
+    int tile_m = blockIdx.y * WMMA_WARPS_PER_BLOCK + warp_id;
+    int tile_n = blockIdx.x;
+    int row = tile_m * WMMA_M;
+    int col = tile_n * WMMA_N;
+
+    if (row >= m || col >= n) {
+        return;
+    }
+
+    wmma::fragment<
+        wmma::matrix_a,
+        WMMA_M, WMMA_N, WMMA_K,
+        half,
+        wmma::row_major> a_frag;
+    wmma::fragment<
+        wmma::matrix_b,
+        WMMA_M, WMMA_N, WMMA_K,
+        half,
+        wmma::row_major> b_frag;
+    wmma::fragment<
+        wmma::accumulator,
+        WMMA_M, WMMA_N, WMMA_K,
+        float> c_frag;
+
+    wmma::fill_fragment(c_frag, 0.0f);
+
+    for (int k0 = 0; k0 < k_size; k0 += WMMA_K) {
+        wmma::load_matrix_sync(
+            a_frag,
+            a + row * k_size + k0,
+            k_size);
+        wmma::load_matrix_sync(
+            b_frag,
+            b + k0 * n + col,
+            n);
+        wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+    }
+
+    wmma::store_matrix_sync(
+        c + row * n + col,
+        c_frag,
+        n,
+        wmma::mem_row_major);
+}
+
+
+void launch_naive(
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    torch::Tensor& c,
+    const GemmProblem& p,
+    cudaStream_t stream) {
+    dim3 block(16, 16);
+    dim3 grid(
+        (p.n + block.x - 1) / block.x,
+        (p.m + block.y - 1) / block.y);
+    gemm_naive_kernel<<<grid, block, 0, stream>>>(
+        a.data_ptr<float>(),
+        b.data_ptr<float>(),
+        c.data_ptr<float>(),
+        p.m, p.n, p.k);
+}
+
+
+template <int PAD>
+void launch_tiled(
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    torch::Tensor& c,
+    const GemmProblem& p,
+    cudaStream_t stream) {
+    dim3 block(TILE, TILE);
+    dim3 grid(
+        (p.n + TILE - 1) / TILE,
+        (p.m + TILE - 1) / TILE);
+    gemm_tiled_kernel<PAD><<<grid, block, 0, stream>>>(
+        a.data_ptr<float>(),
+        b.data_ptr<float>(),
+        c.data_ptr<float>(),
+        p.m, p.n, p.k);
+}
+
+
+template <int RM, int RN>
+void launch_regtile(
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    torch::Tensor& c,
+    const GemmProblem& p,
+    cudaStream_t stream) {
+    dim3 block(TILE, TILE);
+    dim3 grid(
+        (p.n + TILE * RN - 1) / (TILE * RN),
+        (p.m + TILE * RM - 1) / (TILE * RM));
+    gemm_regtile_kernel<RM, RN><<<grid, block, 0, stream>>>(
+        a.data_ptr<float>(),
+        b.data_ptr<float>(),
+        c.data_ptr<float>(),
+        p.m, p.n, p.k);
+}
+
+
+bool aligned_for_float4(
+    const torch::Tensor& b,
+    const torch::Tensor& c,
+    const GemmProblem& p) {
+    uintptr_t b_address = reinterpret_cast<uintptr_t>(b.data_ptr());
+    uintptr_t c_address = reinterpret_cast<uintptr_t>(c.data_ptr());
+    return p.n % 4 == 0 &&
+           b_address % alignof(float4) == 0 &&
+           c_address % alignof(float4) == 0;
+}
+
+
+}  // namespace
+
+
+torch::Tensor gemm_naive(torch::Tensor a, torch::Tensor b) {
+    GemmProblem p = check_fp32(a, b);
+    auto c = make_fp32_output(a, p);
+    if (handle_empty_or_zero_k(c, p)) {
+        return c;
+    }
+
+    c10::cuda::CUDAGuard guard(a.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    launch_naive(a, b, c, p, stream);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return c;
+}
+
+
+torch::Tensor gemm_tiled(torch::Tensor a, torch::Tensor b) {
+    GemmProblem p = check_fp32(a, b);
+    auto c = make_fp32_output(a, p);
+    if (handle_empty_or_zero_k(c, p)) {
+        return c;
+    }
+
+    c10::cuda::CUDAGuard guard(a.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    launch_tiled<0>(a, b, c, p, stream);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return c;
+}
+
+
+torch::Tensor gemm_tiled_padding(torch::Tensor a, torch::Tensor b) {
+    GemmProblem p = check_fp32(a, b);
+    auto c = make_fp32_output(a, p);
+    if (handle_empty_or_zero_k(c, p)) {
+        return c;
+    }
+
+    c10::cuda::CUDAGuard guard(a.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    launch_tiled<1>(a, b, c, p, stream);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return c;
+}
+
+
+torch::Tensor gemm_regtile2x2(torch::Tensor a, torch::Tensor b) {
+    GemmProblem p = check_fp32(a, b);
+    auto c = make_fp32_output(a, p);
+    if (handle_empty_or_zero_k(c, p)) {
+        return c;
+    }
+
+    c10::cuda::CUDAGuard guard(a.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    launch_regtile<2, 2>(a, b, c, p, stream);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return c;
+}
+
+
+torch::Tensor gemm_regtile4x4(torch::Tensor a, torch::Tensor b) {
+    GemmProblem p = check_fp32(a, b);
+    auto c = make_fp32_output(a, p);
+    if (handle_empty_or_zero_k(c, p)) {
+        return c;
+    }
+
+    c10::cuda::CUDAGuard guard(a.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    launch_regtile<4, 4>(a, b, c, p, stream);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return c;
+}
+
+
+torch::Tensor gemm_float4(torch::Tensor a, torch::Tensor b) {
+    GemmProblem p = check_fp32(a, b);
+    auto c = make_fp32_output(a, p);
+    if (handle_empty_or_zero_k(c, p)) {
+        return c;
+    }
+
+    c10::cuda::CUDAGuard guard(a.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    if (!aligned_for_float4(b, c, p)) {
+        launch_naive(a, b, c, p, stream);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        return c;
+    }
+
+    dim3 block(16, 16);
+    dim3 grid(
+        ((p.n / 4) + block.x - 1) / block.x,
+        (p.m + block.y - 1) / block.y);
+    gemm_float4_kernel<<<grid, block, 0, stream>>>(
+        a.data_ptr<float>(),
+        b.data_ptr<float>(),
+        c.data_ptr<float>(),
+        p.m, p.n, p.k);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return c;
+}
+
+
+torch::Tensor gemm_wmma_fp16(torch::Tensor a, torch::Tensor b) {
+    GemmProblem p = check_base(a, b);
+    TORCH_CHECK(a.scalar_type() == at::kHalf &&
+                b.scalar_type() == at::kHalf,
+                "gemm_wmma_fp16 requires float16 inputs");
+
+    auto c = make_fp32_output(a, p);
+    if (handle_empty_or_zero_k(c, p)) {
+        return c;
+    }
+
+    c10::cuda::CUDAGuard guard(a.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    bool exact =
+        p.m % WMMA_M == 0 &&
+        p.n % WMMA_N == 0 &&
+        p.k % WMMA_K == 0;
+
+    if (!exact) {
+        // 安全但昂贵的教学fallback：显式转FP32后调用PyTorch matmul。
+        // Benchmark必须把转换和供应商库调用计入端到端时间。
+        return at::matmul(a.to(at::kFloat), b.to(at::kFloat));
+    }
+
+    dim3 block(32, WMMA_WARPS_PER_BLOCK);
+    dim3 grid(
+        p.n / WMMA_N,
+        (p.m / WMMA_M + WMMA_WARPS_PER_BLOCK - 1) /
+            WMMA_WARPS_PER_BLOCK);
+
+    gemm_wmma_fp16_kernel<<<grid, block, 0, stream>>>(
+        reinterpret_cast<const half*>(a.data_ptr<at::Half>()),
+        reinterpret_cast<const half*>(b.data_ptr<at::Half>()),
+        c.data_ptr<float>(),
+        p.m, p.n, p.k);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return c;
+}
+```
+
+### 14.1 必须逐段回答的问题
+
+1. naive中同一warp对A和B的地址模式分别是什么？
+2. tiled的两个barrier分别保护什么？
+3. padding版本改变了哪些地址，为什么可能完全没有收益？
+4. 2×2与4×4各自输出多大CTA tile？grid block数怎样变化？
+5. float4为什么要求N%4、B基址和C基址同时满足条件？
+6. WMMA中一个block有几个warp、输出多少行tile？
+7. 不规则WMMA fallback为什么不能与“纯WMMA kernel时间”混为一谈？
+
+### 14.2 参考代码的故意限制
+
+- FP32 CUDA版本用于学习，不追求cuBLAS级pipeline。
+- float4版本只向量化B和C，没有shared tiling；它是受控实验，不是最终最佳版本。
+- WMMA只实现FP16输入，BF16由Triton路径覆盖。
+- 没有实现double buffering、`cp.async`、TMA和复杂swizzle。
+- `at::matmul` fallback是正确性优先的教学方案，必须报告转换成本。
+
+这些限制不是遗漏，而是为了让每次变化仍能被新人独立解释。
+
+---
+
+## 15. Softmax完整参考实现 `src/softmax.cu`
+
+本章提供两个版本：`fused`把整行暂存在shared memory中，理想情况下只从global读取一次；`online`不缓存整行，用在线状态计算统计量后第二次读取输入输出结果。
+
+```cpp
+#include <torch/extension.h>
+
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
+
+#include <cuda.h>
+#include <cuda_runtime.h>
+
+#include <cmath>
+#include <cstdint>
+#include <limits>
+
+
+namespace {
+
+
+template <typename scalar_t>
+__device__ __forceinline__ float load_as_float(
+    const scalar_t* pointer,
+    int64_t index) {
+    return static_cast<float>(pointer[index]);
+}
+
+
+__device__ __forceinline__ float warp_reduce_sum(float value) {
+    constexpr unsigned int mask = 0xffffffffu;
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        value += __shfl_down_sync(mask, value, offset);
+    }
+    return value;
+}
+
+
+__device__ __forceinline__ float warp_reduce_max(float value) {
+    constexpr unsigned int mask = 0xffffffffu;
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        value = fmaxf(value, __shfl_down_sync(mask, value, offset));
+    }
+    return value;
+}
+
+
+__device__ float block_reduce_sum(
+    float value,
+    float* warp_values) {
+    int tid = threadIdx.x;
+    int lane = tid & 31;
+    int warp_id = tid >> 5;
+    int num_warps = (blockDim.x + 31) / 32;
+
+    value = warp_reduce_sum(value);
+    if (lane == 0) {
+        warp_values[warp_id] = value;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float first_warp_value =
+            lane < num_warps ? warp_values[lane] : 0.0f;
+        first_warp_value = warp_reduce_sum(first_warp_value);
+        if (lane == 0) {
+            warp_values[0] = first_warp_value;
+        }
+    }
+    __syncthreads();
+    return warp_values[0];
+}
+
+
+__device__ float block_reduce_max(
+    float value,
+    float* warp_values) {
+    int tid = threadIdx.x;
+    int lane = tid & 31;
+    int warp_id = tid >> 5;
+    int num_warps = (blockDim.x + 31) / 32;
+
+    value = warp_reduce_max(value);
+    if (lane == 0) {
+        warp_values[warp_id] = value;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float first_warp_value =
+            lane < num_warps ? warp_values[lane] : -INFINITY;
+        first_warp_value = warp_reduce_max(first_warp_value);
+        if (lane == 0) {
+            warp_values[0] = first_warp_value;
+        }
+    }
+    __syncthreads();
+    return warp_values[0];
+}
+
+
+struct OnlineState {
+    float max_value;
+    float normalizer;
+};
+
+
+__device__ __forceinline__ OnlineState combine_online(
+    OnlineState left,
+    OnlineState right) {
+    if (left.normalizer == 0.0f) {
+        return right;
+    }
+    if (right.normalizer == 0.0f) {
+        return left;
+    }
+
+    float new_max = fmaxf(left.max_value, right.max_value);
+    float new_normalizer =
+        left.normalizer * expf(left.max_value - new_max) +
+        right.normalizer * expf(right.max_value - new_max);
+    return {new_max, new_normalizer};
+}
+
+
+__device__ __forceinline__ OnlineState warp_reduce_online(
+    OnlineState value) {
+    constexpr unsigned int mask = 0xffffffffu;
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        OnlineState other{
+            __shfl_down_sync(mask, value.max_value, offset),
+            __shfl_down_sync(mask, value.normalizer, offset),
+        };
+        value = combine_online(value, other);
+    }
+    return value;
+}
+
+
+__device__ OnlineState block_reduce_online(
+    OnlineState value,
+    float* warp_max,
+    float* warp_normalizer) {
+    int tid = threadIdx.x;
+    int lane = tid & 31;
+    int warp_id = tid >> 5;
+    int num_warps = (blockDim.x + 31) / 32;
+
+    value = warp_reduce_online(value);
+    if (lane == 0) {
+        warp_max[warp_id] = value.max_value;
+        warp_normalizer[warp_id] = value.normalizer;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        OnlineState first_warp_value =
+            lane < num_warps
+                ? OnlineState{warp_max[lane], warp_normalizer[lane]}
+                : OnlineState{-INFINITY, 0.0f};
+        first_warp_value = warp_reduce_online(first_warp_value);
+        if (lane == 0) {
+            warp_max[0] = first_warp_value.max_value;
+            warp_normalizer[0] = first_warp_value.normalizer;
+        }
+    }
+    __syncthreads();
+    return {warp_max[0], warp_normalizer[0]};
+}
+
+
+template <typename scalar_t>
+__global__ void softmax_fused_kernel(
+    const scalar_t* __restrict__ input,
+    scalar_t* __restrict__ output,
+    int64_t rows,
+    int64_t cols) {
+    extern __shared__ float row_buffer[];
+    __shared__ float warp_values[32];
+
+    int64_t row = blockIdx.x;
+    int tid = threadIdx.x;
+
+    for (int64_t col = tid; col < cols; col += blockDim.x) {
+        row_buffer[col] =
+            load_as_float(input, row * cols + col);
+    }
+    __syncthreads();
+
+    float local_max = -INFINITY;
+    for (int64_t col = tid; col < cols; col += blockDim.x) {
+        local_max = fmaxf(local_max, row_buffer[col]);
+    }
+    float row_max = block_reduce_max(local_max, warp_values);
+
+    float local_sum = 0.0f;
+    for (int64_t col = tid; col < cols; col += blockDim.x) {
+        float numerator = expf(row_buffer[col] - row_max);
+        row_buffer[col] = numerator;
+        local_sum += numerator;
+    }
+    float row_sum = block_reduce_sum(local_sum, warp_values);
+
+    for (int64_t col = tid; col < cols; col += blockDim.x) {
+        output[row * cols + col] =
+            static_cast<scalar_t>(row_buffer[col] / row_sum);
+    }
+}
+
+
+template <typename scalar_t>
+__global__ void softmax_online_kernel(
+    const scalar_t* __restrict__ input,
+    scalar_t* __restrict__ output,
+    int64_t rows,
+    int64_t cols) {
+    __shared__ float warp_max[32];
+    __shared__ float warp_normalizer[32];
+
+    int64_t row = blockIdx.x;
+    int tid = threadIdx.x;
+
+    OnlineState local{-INFINITY, 0.0f};
+    for (int64_t col = tid; col < cols; col += blockDim.x) {
+        float x = load_as_float(input, row * cols + col);
+        OnlineState one{x, 1.0f};
+        local = combine_online(local, one);
+    }
+
+    OnlineState total = block_reduce_online(
+        local, warp_max, warp_normalizer);
+
+    for (int64_t col = tid; col < cols; col += blockDim.x) {
+        float x = load_as_float(input, row * cols + col);
+        float value = expf(x - total.max_value) / total.normalizer;
+        output[row * cols + col] = static_cast<scalar_t>(value);
+    }
+}
+
+
+struct SoftmaxProblem {
+    int64_t rows;
+    int64_t cols;
+};
+
+
+SoftmaxProblem check_softmax(const torch::Tensor& x) {
+    TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
+    TORCH_CHECK(x.is_contiguous(), "x must be contiguous");
+    TORCH_CHECK(x.dim() == 2, "x must be 2D [rows, cols]");
+    TORCH_CHECK(
+        x.scalar_type() == at::kFloat ||
+        x.scalar_type() == at::kHalf ||
+        x.scalar_type() == at::kBFloat16,
+        "supported dtypes: float32, float16, bfloat16");
+    return {x.size(0), x.size(1)};
+}
+
+
+int choose_threads(int64_t cols) {
+    if (cols <= 128) {
+        return 128;
+    }
+    return 256;
+}
+
+
+}  // namespace
+
+
+torch::Tensor softmax_fused(torch::Tensor x) {
+    SoftmaxProblem p = check_softmax(x);
+    auto output = torch::empty_like(x);
+    if (p.rows == 0 || p.cols == 0) {
+        return output;
+    }
+
+    // 8192个FP32临时值需要32 KiB dynamic shared memory。
+    TORCH_CHECK(p.cols <= 8192,
+                "softmax_fused supports cols <= 8192; use online fallback");
+
+    c10::cuda::CUDAGuard guard(x.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    int threads = choose_threads(p.cols);
+    size_t shared_bytes = static_cast<size_t>(p.cols) * sizeof(float);
+
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half,
+        at::ScalarType::BFloat16,
+        x.scalar_type(),
+        "softmax_fused",
+        [&] {
+            softmax_fused_kernel<scalar_t><<<
+                p.rows, threads, shared_bytes, stream>>>(
+                    x.data_ptr<scalar_t>(),
+                    output.data_ptr<scalar_t>(),
+                    p.rows,
+                    p.cols);
+        });
+
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return output;
+}
+
+
+torch::Tensor softmax_online(torch::Tensor x) {
+    SoftmaxProblem p = check_softmax(x);
+    auto output = torch::empty_like(x);
+    if (p.rows == 0 || p.cols == 0) {
+        return output;
+    }
+
+    c10::cuda::CUDAGuard guard(x.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    int threads = choose_threads(p.cols);
+
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half,
+        at::ScalarType::BFloat16,
+        x.scalar_type(),
+        "softmax_online",
+        [&] {
+            softmax_online_kernel<scalar_t><<<
+                p.rows, threads, 0, stream>>>(
+                    x.data_ptr<scalar_t>(),
+                    output.data_ptr<scalar_t>(),
+                    p.rows,
+                    p.cols);
+        });
+
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return output;
+}
+```
+
+### 15.1 两个版本的资源差异
+
+| 版本   | Global读取 | Global写入 | 主要片上状态                    | 主要限制                  |
+| :----- | :--------- | :--------- | :------------------------------ | :------------------------ |
+| fused  | 理想1次x   | 1次y       | `cols × 4 bytes` dynamic shared | 行太长时shared容量        |
+| online | 2次x       | 1次y       | 每thread `(m,l)` + warp部分状态 | 多一次global读取、exp开销 |
+
+fused并不保证总是更快。短行可能受launch限制；shared占用可能降低blocks/SM；online虽然多读一次，却允许更长行且资源更稳定。
+
+### 15.2 必须理解的identity
+
+- max identity：负无穷。
+- sum identity：0。
+- online identity：`(-∞, 0)`。
+
+`combine_online`显式处理normalizer为0的identity，避免计算`exp(-∞ - -∞)`产生NaN。
+
+### 15.3 参考实现限制
+
+- 每个block只处理一行；rows很少时并行度不足。
+- fused把FP16/BF16输入转换为FP32 shared缓存，shared需求按4 bytes/元素计算。
+- 未融合scale/mask，作为课后改造任务。
+- `expf`的精度和吞吐需要与PyTorch参考和Profiler共同验证。
+- 整行全为负无穷、包含正无穷或NaN时，要先定义与PyTorch一致的语义并测试。
+
+---
+
+## 16. Triton GEMM `python/triton_gemm.py`
+
+安装Triton应使用目标PyTorch/GPU环境已验证的版本。下面实现不使用autotune，先让tile选择成为你能解释的受控变量。
+
+```python
+import torch
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _matmul_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    stride_am: tl.constexpr,
+    stride_ak: tl.constexpr,
+    stride_bk: tl.constexpr,
+    stride_bn: tl.constexpr,
+    stride_cm: tl.constexpr,
+    stride_cn: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+
+    num_pid_in_group = GROUP_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_M
+    group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_M)
+    pid_m = first_pid_m + (pid % num_pid_in_group) % group_size_m
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+
+    a_ptrs = (
+        a_ptr
+        + offs_m[:, None] * stride_am
+        + offs_k[None, :] * stride_ak
+    )
+    b_ptrs = (
+        b_ptr
+        + offs_k[:, None] * stride_bk
+        + offs_n[None, :] * stride_bn
+    )
+
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for k_block in range(0, tl.cdiv(K, BLOCK_K)):
+        k_remaining = K - k_block * BLOCK_K
+        a_mask = (offs_m[:, None] < M) & (offs_k[None, :] < k_remaining)
+        b_mask = (offs_k[:, None] < k_remaining) & (offs_n[None, :] < N)
+        a = tl.load(a_ptrs, mask=a_mask, other=0.0)
+        b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+        accumulator = tl.dot(a, b, accumulator)
+        a_ptrs += BLOCK_K * stride_ak
+        b_ptrs += BLOCK_K * stride_bk
+
+    c_ptrs = (
+        c_ptr
+        + offs_m[:, None] * stride_cm
+        + offs_n[None, :] * stride_cn
+    )
+    c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    tl.store(c_ptrs, accumulator, mask=c_mask)
+
+
+def _select_config(M, N, K):
+    if M <= 32:
+        return {
+            "BLOCK_M": 16,
+            "BLOCK_N": 64,
+            "BLOCK_K": 32,
+            "GROUP_M": 4,
+            "num_warps": 4,
+        }
+    if M <= 128:
+        return {
+            "BLOCK_M": 32,
+            "BLOCK_N": 64,
+            "BLOCK_K": 32,
+            "GROUP_M": 4,
+            "num_warps": 4,
+        }
+    return {
+        "BLOCK_M": 64,
+        "BLOCK_N": 64,
+        "BLOCK_K": 32,
+        "GROUP_M": 8,
+        "num_warps": 4,
+    }
+
+
+def triton_matmul(a, b, config=None):
+    if not a.is_cuda or not b.is_cuda:
+        raise ValueError("a and b must be CUDA tensors")
+    if a.ndim != 2 or b.ndim != 2:
+        raise ValueError("a and b must be 2D")
+    if a.shape[1] != b.shape[0]:
+        raise ValueError("a.shape[1] must equal b.shape[0]")
+    if a.device != b.device:
+        raise ValueError("a and b must be on the same device")
+    if a.dtype != b.dtype:
+        raise ValueError("a and b must have the same dtype")
+    if a.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError("Triton path supports float16 and bfloat16")
+    if not a.is_contiguous() or not b.is_contiguous():
+        raise ValueError("a and b must be contiguous")
+
+    M, K = a.shape
+    _, N = b.shape
+    if M == 0 or N == 0:
+        return torch.empty((M, N), device=a.device, dtype=torch.float32)
+    if K == 0:
+        return torch.zeros((M, N), device=a.device, dtype=torch.float32)
+
+    selected = dict(_select_config(M, N, K) if config is None else config)
+    num_warps = selected.pop("num_warps")
+    grid = (
+        triton.cdiv(M, selected["BLOCK_M"])
+        * triton.cdiv(N, selected["BLOCK_N"]),
+    )
+
+    c = torch.empty((M, N), device=a.device, dtype=torch.float32)
+    _matmul_kernel[grid](
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        **selected,
+        num_warps=num_warps,
+    )
+    return c
+```
+
+### 16.1 为什么这是阶段2对照，而不是抄官方教程
+
+你必须完成三项改造：
+
+1. 使用本教材统一的FP32输出、shape matrix、容差和benchmark。
+2. 对小M、方阵、不规则shape分别选择并解释config。
+3. 固定一个shape，比较至少三组`BLOCK_M/N/K、GROUP_M、num_warps`，记录JIT后稳态结果和资源差异。
+
+### 16.2 Triton代码怎样对应CUDA概念
+
+| Triton概念       | CUDA/GEMM中的对应含义                      |
+| :--------------- | :----------------------------------------- |
+| program instance | 近似一个负责输出tile的执行单元             |
+| `BLOCK_M/N/K`    | CTA/program tile和K tile                   |
+| `tl.arange`      | tile内向量化索引集合                       |
+| mask             | M/N/K尾部保护                              |
+| `tl.dot`         | 由编译器选择并生成矩阵乘加/Tensor Core路径 |
+| `num_warps`      | 一个program使用的warp数量                  |
+| `GROUP_M`        | program执行顺序调整，促进L2复用            |
+
+### 16.3 必做Config实验
+
+```python
+CONFIGS = [
+    dict(BLOCK_M=16, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4),
+    dict(BLOCK_M=32, BLOCK_N=64, BLOCK_K=32, GROUP_M=4, num_warps=4),
+    dict(BLOCK_M=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8, num_warps=4),
+    dict(BLOCK_M=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=8, num_warps=8),
+]
+```
+
+对`M=1/32/128/1024`分别比较。不能只保留每个shape最优config，还要解释失败config为什么浪费tile、降低并行度或增加资源。
+
+---
+
+## 17. 正确性测试
+
+### 17.1 `tests/test_gemm.py`
+
+```python
+import pathlib
+import sys
+
+import pytest
+import torch
+
+import stage2_kernel_lab as ops
+
+sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "python"))
+from triton_gemm import triton_matmul
+
+
+FP32_SHAPES = [
+    (0, 7, 5),
+    (7, 0, 5),
+    (7, 9, 0),
+    (1, 1, 1),
+    (15, 17, 16),
+    (16, 16, 16),
+    (17, 15, 19),
+    (123, 145, 67),
+    (255, 257, 511),
+    (512, 512, 512),
+]
+
+FP32_IMPLS = [
+    ops.gemm_naive,
+    ops.gemm_tiled,
+    ops.gemm_tiled_padding,
+    ops.gemm_regtile2x2,
+    ops.gemm_regtile4x4,
+    ops.gemm_float4,
+]
+
+
+@pytest.fixture(autouse=True)
+def disable_tf32_for_reference():
+    old = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    yield
+    torch.backends.cuda.matmul.allow_tf32 = old
+
+
+@pytest.mark.parametrize("shape", FP32_SHAPES)
+@pytest.mark.parametrize("fn", FP32_IMPLS)
+def test_fp32_gemm(fn, shape):
+    M, N, K = shape
+    torch.manual_seed(M * 1000000 + N * 1000 + K)
+    a = torch.randn(M, K, device="cuda", dtype=torch.float32)
+    b = torch.randn(K, N, device="cuda", dtype=torch.float32)
+    actual = fn(a, b)
+    expected = a @ b
+    torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("shape", [
+    (16, 16, 16),
+    (64, 64, 64),
+    (128, 256, 512),
+    (123, 145, 67),
+])
+def test_wmma_fp16_and_fallback(shape):
+    M, N, K = shape
+    torch.manual_seed(7)
+    a = torch.randn(M, K, device="cuda", dtype=torch.float16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.float16)
+    actual = ops.gemm_wmma_fp16(a, b)
+    expected = a.float() @ b.float()
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape", [
+    (1, 4096, 4096),
+    (32, 4096, 4096),
+    (123, 145, 67),
+    (512, 512, 512),
+])
+def test_triton_gemm(dtype, shape):
+    M, N, K = shape
+    torch.manual_seed(11)
+    a = torch.randn(M, K, device="cuda", dtype=dtype)
+    b = torch.randn(K, N, device="cuda", dtype=dtype)
+    actual = triton_matmul(a, b)
+    expected = a.float() @ b.float()
+    tolerance = 3e-2 if dtype == torch.float16 else 8e-2
+    torch.testing.assert_close(
+        actual, expected, rtol=tolerance, atol=tolerance)
+
+
+def test_noncontiguous_rejected():
+    a = torch.randn(17, 19, device="cuda").t()
+    b = torch.randn(17, 23, device="cuda")
+    with pytest.raises(RuntimeError, match="contiguous"):
+        ops.gemm_tiled(a, b)
+
+
+def test_dtype_mismatch_rejected():
+    a = torch.randn(8, 8, device="cuda", dtype=torch.float32)
+    b = torch.randn(8, 8, device="cuda", dtype=torch.float16)
+    with pytest.raises(RuntimeError, match="float32"):
+        ops.gemm_tiled(a, b)
+
+
+def test_float4_unaligned_contiguous_fallback():
+    M, N, K = 17, 64, 19
+    a = torch.randn(M, K, device="cuda")
+    storage = torch.randn(K * N + 1, device="cuda")
+    b = storage[1:].view(K, N)
+    assert b.is_contiguous()
+    actual = ops.gemm_float4(a, b)
+    torch.testing.assert_close(actual, a @ b, rtol=2e-3, atol=2e-3)
+
+
+def test_gemm_current_stream():
+    stream = torch.cuda.Stream()
+    a = torch.randn(257, 129, device="cuda")
+    b = torch.randn(129, 255, device="cuda")
+    with torch.cuda.stream(stream):
+        actual = ops.gemm_regtile2x2(a, b)
+        done = torch.cuda.Event()
+        done.record(stream)
+    done.synchronize()
+    torch.testing.assert_close(actual, a @ b, rtol=2e-3, atol=2e-3)
+```
+
+#### 为什么关闭TF32
+
+手写FP32 SIMT kernel使用FP32乘加，而PyTorch在某些GPU/版本可能允许FP32输入走TF32 Tensor Core。正确性reference若不固定该设置，误差来源会混合“实现错误”和“数学路径不同”。性能实验可以另开TF32基线，但必须单独命名并记录。
+
+#### 误差报告不能只有assert
+
+为每个dtype/shape额外保存：max absolute、max relative、mean absolute、P99 absolute、NaN/Inf数量。测试阈值只负责拦截错误，报告负责解释误差。
+
+### 17.2 `tests/test_softmax.py`
+
+```python
+import pytest
+import torch
+
+import stage2_kernel_lab as ops
+
+
+DTYPES = [torch.float32, torch.float16, torch.bfloat16]
+SHAPES = [
+    (0, 17),
+    (7, 0),
+    (1, 1),
+    (1, 31),
+    (2, 32),
+    (17, 33),
+    (32, 127),
+    (32, 128),
+    (32, 129),
+    (1024, 1024),
+    (17, 4097),
+]
+
+
+def tolerance(dtype):
+    if dtype == torch.float32:
+        return 2e-5
+    if dtype == torch.float16:
+        return 3e-3
+    return 2e-2
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("fn", [ops.softmax_fused, ops.softmax_online])
+def test_softmax(dtype, shape, fn):
+    rows, cols = shape
+    torch.manual_seed(rows * 10000 + cols)
+    x = torch.randn(rows, cols, device="cuda", dtype=dtype) * 10
+    actual = fn(x)
+    expected = torch.softmax(x, dim=-1)
+    tol = tolerance(dtype)
+    torch.testing.assert_close(actual, expected, rtol=tol, atol=tol)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("fn", [ops.softmax_fused, ops.softmax_online])
+def test_softmax_properties(dtype, fn):
+    x = torch.randn(127, 257, device="cuda", dtype=dtype)
+    y = fn(x)
+    tol = tolerance(dtype)
+    torch.testing.assert_close(
+        y.float().sum(dim=-1),
+        torch.ones(127, device="cuda"),
+        rtol=tol,
+        atol=tol,
+    )
+    assert torch.all(y >= 0)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_all_equal(dtype):
+    x = torch.full((17, 33), 100.0, device="cuda", dtype=dtype)
+    expected = torch.full_like(x, 1.0 / 33)
+    for fn in (ops.softmax_fused, ops.softmax_online):
+        actual = fn(x)
+        tol = tolerance(dtype)
+        torch.testing.assert_close(actual, expected, rtol=tol, atol=tol)
+
+
+def test_fused_shared_limit_and_online_fallback():
+    x = torch.randn(2, 9000, device="cuda")
+    with pytest.raises(RuntimeError, match="8192"):
+        ops.softmax_fused(x)
+    actual = ops.softmax_online(x)
+    torch.testing.assert_close(
+        actual, torch.softmax(x, dim=-1), rtol=2e-5, atol=2e-5)
+
+
+def test_noncontiguous_rejected():
+    x = torch.randn(17, 33, device="cuda").t()
+    with pytest.raises(RuntimeError, match="contiguous"):
+        ops.softmax_online(x)
+
+
+def test_softmax_current_stream():
+    stream = torch.cuda.Stream()
+    x = torch.randn(127, 257, device="cuda")
+    with torch.cuda.stream(stream):
+        actual = ops.softmax_online(x)
+        done = torch.cuda.Event()
+        done.record(stream)
+    done.synchronize()
+    torch.testing.assert_close(
+        actual, torch.softmax(x, dim=-1), rtol=2e-5, atol=2e-5)
+```
+
+需要自行补充：NaN、正无穷、全负无穷、scale、causal mask、全mask行和固定回归shape。先观察PyTorch语义，再把接口契约写进README。
+
+### 17.3 构建与运行
+
+```bash
+python -m pip install -v -e .
+pytest -q tests/test_gemm.py
+pytest -q tests/test_softmax.py
+```
+
+测试失败时禁止先跑Profiler。先把失败缩小到最小shape，确认索引、尾部、layout、dtype和累加协议。
+
+---
+
+## 18. Benchmark与Profiler工程
+
+### 18.1 `benchmark/bench_gemm.py`
+
+```python
+import csv
+import pathlib
+import statistics
+import sys
+
+import torch
+
+import stage2_kernel_lab as ops
+
+sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "python"))
+from triton_gemm import triton_matmul
+
+
+def percentile(values, p):
+    values = sorted(values)
+    position = (len(values) - 1) * p
+    low = int(position)
+    high = min(low + 1, len(values) - 1)
+    weight = position - low
+    return values[low] * (1 - weight) + values[high] * weight
+
+
+def cuda_bench(fn, warmup=20, repeats=40, inner=10):
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+
+    samples = []
+    for _ in range(repeats):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(inner):
+            fn()
+        end.record()
+        end.synchronize()
+        samples.append(start.elapsed_time(end) / inner)
+
+    return {
+        "median_ms": statistics.median(samples),
+        "p90_ms": percentile(samples, 0.90),
+        "p95_ms": percentile(samples, 0.95),
+        "min_ms": min(samples),
+        "max_ms": max(samples),
+    }
+
+
+def tflops(M, N, K, milliseconds):
+    return 2.0 * M * N * K / (milliseconds * 1e-3) / 1e12
+
+
+def environment():
+    index = torch.cuda.current_device()
+    return {
+        "gpu": torch.cuda.get_device_name(index),
+        "capability": str(torch.cuda.get_device_capability(index)),
+        "torch": torch.__version__,
+        "torch_cuda": str(torch.version.cuda),
+        "tf32": str(torch.backends.cuda.matmul.allow_tf32),
+    }
+
+
+def fp32_implementations(a, b):
+    return {
+        "torch_fp32": lambda: a @ b,
+        "naive": lambda: ops.gemm_naive(a, b),
+        "tiled": lambda: ops.gemm_tiled(a, b),
+        "tiled_padding": lambda: ops.gemm_tiled_padding(a, b),
+        "regtile2x2": lambda: ops.gemm_regtile2x2(a, b),
+        "regtile4x4": lambda: ops.gemm_regtile4x4(a, b),
+        "float4": lambda: ops.gemm_float4(a, b),
+    }
+
+
+def low_precision_implementations(a, b):
+    result = {
+        # native输出为低精度；用于供应商库性能参考，契约差异必须记录。
+        "torch_native": lambda: a @ b,
+        # 输入先转FP32后做FP32 GEMM；输出契约一致，但计算路径不同。
+        "torch_fp32_contract": lambda: a.float() @ b.float(),
+        "triton_fp32_output": lambda: triton_matmul(a, b),
+    }
+    if a.dtype == torch.float16:
+        result["wmma_fp32_output"] = lambda: ops.gemm_wmma_fp16(a, b)
+    return result
+
+
+def main():
+    torch.manual_seed(7)
+    print(environment())
+
+    shapes = [
+        (128, 128, 128),
+        (512, 512, 512),
+        (1024, 1024, 1024),
+        (1, 4096, 4096),
+        (128, 4096, 4096),
+        (4096, 11008, 4096),
+        (123, 145, 67),
+        (255, 257, 511),
+    ]
+
+    rows = []
+    for dtype in (torch.float32, torch.float16, torch.bfloat16):
+        for M, N, K in shapes:
+            a = torch.randn(M, K, device="cuda", dtype=dtype)
+            b = torch.randn(K, N, device="cuda", dtype=dtype)
+
+            implementations = (
+                fp32_implementations(a, b)
+                if dtype == torch.float32
+                else low_precision_implementations(a, b)
+            )
+
+            for name, fn in implementations.items():
+                # naive对大问题会极慢，不让教学基线拖垮整次运行。
+                if name == "naive" and M * N * K > 512**3:
+                    continue
+                try:
+                    stats = cuda_bench(fn)
+                except RuntimeError as error:
+                    print("SKIP", dtype, (M, N, K), name, error)
+                    continue
+
+                row = {
+                    "dtype": str(dtype),
+                    "M": M,
+                    "N": N,
+                    "K": K,
+                    "implementation": name,
+                    **stats,
+                    "effective_tflops": tflops(
+                        M, N, K, stats["median_ms"]),
+                }
+                rows.append(row)
+                print(row)
+
+    output = pathlib.Path("reports/version_results.csv")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+大shape可能超过显存或运行过久，允许按GPU容量缩小，但不要删除小M、长条、不规则这些类别。
+
+### 18.2 低精度基线为什么有两个
+
+`torch_native`最接近实际供应商低精度GEMM性能，但输出通常是低精度；教材WMMA/Triton输出FP32。`torch_fp32_contract`输出一致，却包含转换并使用不同计算路径。
+
+因此报告中：
+
+- 不能把任一基线称为完全同协议而不说明差异。
+- 需要分别报告kernel-only和端到端转换成本。
+- 可以把native库当性能上限参考，把FP32 contract当正确性/接口参考。
+
+### 18.3 Triton JIT时间
+
+第一次调用Triton包含JIT编译，稳态benchmark的warmup会把它排除。必须单独记录首次调用：
+
+```python
+import time
+
+torch.cuda.synchronize()
+start = time.perf_counter()
+triton_matmul(a, b)
+torch.cuda.synchronize()
+first_call_ms = (time.perf_counter() - start) * 1000
+print("Triton first call including JIT:", first_call_ms, "ms")
+```
+
+不能拿首次Triton时间与已编译CUDA kernel比较，也不能在部署讨论中完全忽略JIT成本。
+
+### 18.4 `benchmark/bench_softmax.py`
+
+```python
+import pathlib
+
+import torch
+
+import stage2_kernel_lab as ops
+from bench_gemm import cuda_bench
+
+
+def effective_gbps(x, milliseconds):
+    minimum_bytes = 2 * x.numel() * x.element_size()
+    return minimum_bytes / (milliseconds * 1e-3) / 1e9
+
+
+def main():
+    torch.manual_seed(13)
+    results = []
+    for dtype in (torch.float32, torch.float16, torch.bfloat16):
+        for rows, cols in [
+            (1, 32),
+            (1, 4096),
+            (32, 128),
+            (32, 4097),
+            (1024, 128),
+            (1024, 1024),
+            (4096, 4096),
+        ]:
+            x = torch.randn(rows, cols, device="cuda", dtype=dtype)
+            implementations = {
+                "torch": lambda: torch.softmax(x, dim=-1),
+                "fused": lambda: ops.softmax_fused(x),
+                "online": lambda: ops.softmax_online(x),
+            }
+            for name, fn in implementations.items():
+                stats = cuda_bench(fn)
+                record = {
+                    "dtype": str(dtype),
+                    "rows": rows,
+                    "cols": cols,
+                    "implementation": name,
+                    **stats,
+                    "effective_gbps": effective_gbps(
+                        x, stats["median_ms"]),
+                }
+                results.append(record)
+                print(record)
+
+    output = pathlib.Path("reports/softmax_results.txt")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(map(str, results)) + "\n")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+有效GB/s只按最少“一读一写”计算。fused、online和PyTorch实际DRAM流量不同，应在NCU中另看绝对bytes。
+
+### 18.5 `benchmark/profile_entry.py`
+
+```python
+import argparse
+
+import torch
+
+import stage2_kernel_lab as ops
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--op", required=True)
+    parser.add_argument("--iters", type=int, default=10)
+    args = parser.parse_args()
+
+    torch.manual_seed(17)
+    if args.op.startswith("gemm"):
+        a = torch.randn(1024, 1024, device="cuda")
+        b = torch.randn(1024, 1024, device="cuda")
+        fn = getattr(ops, args.op)
+        for _ in range(args.iters):
+            fn(a, b)
+    elif args.op.startswith("softmax"):
+        x = torch.randn(1024, 4096, device="cuda")
+        fn = getattr(ops, args.op)
+        for _ in range(args.iters):
+            fn(x)
+    else:
+        raise ValueError(f"unknown op: {args.op}")
+
+    torch.cuda.synchronize()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### 18.6 NSYS命令
+
+```bash
+mkdir -p reports/nsys
+nsys profile \
+  --trace=cuda,nvtx,osrt \
+  --stats=true \
+  --force-overwrite=true \
+  -o reports/nsys/gemm_benchmark \
+  python benchmark/bench_gemm.py
+```
+
+按时间线检查：首次初始化/JIT、CPU gap、dtype转换、分配、launch间隔、同步、Kernel持续时间和排列。先确认目标Kernel真的占主要时间，再进入NCU。
+
+### 18.7 NCU命令
+
+```bash
+mkdir -p reports/ncu
+ncu \
+  --target-processes all \
+  --set full \
+  --force-overwrite \
+  -o reports/ncu/gemm_regtile2x2 \
+  python benchmark/profile_entry.py \
+  --op gemm_regtile2x2 \
+  --iters 1
+```
+
+Profiler权限不足时按服务器规范处理，不要在教材脚本中默认写`sudo`。`--set full`可能运行较慢；先用较轻section确定方向，再针对一个Kernel收集完整报告。
+
+### 18.8 PTX/SASS与编译报告
+
+找到扩展共享库：
+
+```bash
+find . -name 'stage2_kernel_lab*.so'
+```
+
+查看SASS：
+
+```bash
+cuobjdump --dump-sass path/to/stage2_kernel_lab.so > reports/stage2.sass
+```
+
+搜索方向：
+
+- WMMA/MMA/HMMA相关矩阵乘加指令。
+- vectorized版本是否出现宽load/store。
+- local memory load/store是否支持spill假设。
+- FP32版本的FMA指令路径。
+
+指令名称随GPU代际变化。结论写“在目标GPU/工具链观察到什么”，不要把某一代SASS名字当成跨代永久规则。
+
+---
+
+## 19. 八轮执行安排
+
+“一轮”通常是一周，但验收优先于日历。每轮只产出一个可复现结论。
+
+### 第一轮：冻结契约和基线
+
+- 建工程、环境快照、shape matrix和测试骨架。
+- 完成naive，手算FLOPs/bytes和地址模式。
+- 建PyTorch/cuBLAS与CUDA Event基线。
+
+**出口：** naive全shape正确，性能数字可复现，能解释它为什么慢。
+
+### 第二轮：Shared tiling
+
+- 独立实现tiled，不复制参考核心代码。
+- 推导global读取减少、shared占用和barrier。
+- naive/tiled受控对照与第一次NCU。
+
+**出口：** 指标支持或修正你的复用模型。
+
+### 第三轮：Register tile 2×2
+
+- 独立实现2×2。
+- 推导shared读取、CTA tile、grid和register变化。
+- 方阵、小M、不规则shape对照。
+
+**出口：** 能说明2×2在哪些shape获益，在哪里无效。
+
+### 第四轮：4×4退化与竞争假设
+
+- 实现4×4，保留失败数据。
+- 提出至少两个竞争假设。
+- 用编译报告、grid/wave、NCU逐个排除。
+
+**出口：** 一份“优化变慢”的完整复盘，而不是删除慢版本。
+
+### 第五轮：Padding、float4和fallback
+
+- padding先算bank再运行。
+- float4验证alignment、指令、请求和Duration。
+- 覆盖N非4整数倍和不对齐输入。
+
+**出口：** 至少一个“经验技巧有效或无效”的因果结论。
+
+### 第六轮：WMMA与Triton
+
+- FP16 WMMA精确shape与fallback。
+- FP16/BF16 Triton，修改三组config。
+- 用指令/NCU确认Tensor Core路径。
+- 与供应商库诚实比较契约差异。
+
+**出口：** 低精度主案例、指令证据和主流栈对照。
+
+### 第七轮：Softmax迁移
+
+- fused与online正确性、读写推导和shape sweep。
+- NCU分析短行/长行、少rows/多rows。
+- 选择一次scale或mask融合改造。
+
+**出口：** 第二算子达到L3～L4，不只是GEMM经验复述。
+
+### 第八轮：报告、回归与延迟复测
+
+- 汇总版本总表、主报告和失败案例。
+- 固定性能回归shape和阈值。
+- 清理README、一键测试/benchmark/profile命令。
+- 一周后关闭教材重写naive、tiled、regtile2x2。
+
+**出口：** 陌生工程师能复现数字，你能脱离文档解释全部因果。
+
+---
+
+## 20. 性能报告模板
+
+每一个主要版本使用同一模板：
+
+```text
+# 版本名称
+
+## 1. 问题和契约
+shape、dtype、layout、累加、输出、边界、stream
+
+## 2. Baseline
+naive、PyTorch/供应商库、前一版本
+
+## 3. 变化
+只描述本版本相对前一版本改变的主要变量
+
+## 4. 运行前预测
+FLOPs、bytes、load/store、tile、register、shared、grid/wave、指令
+
+## 5. 正确性
+shape matrix、误差分布、极值、失败/回归
+
+## 6. 测量协议
+GPU、软件、编译、seed、warmup、repeats、计时器、统计
+
+## 7. 结果
+median/P90/P95、TFLOP/s或GB/s、与各baseline比例
+
+## 8. Profiler证据
+NSYS层级；NCU八步；绝对bytes/requests/sectors；资源；stall；指令
+
+## 9. 竞争假设和排除
+至少两个假设、最小实验、支持/反驳证据
+
+## 10. 结论
+为什么变快/慢、代价、适用shape、不可推广范围
+
+## 11. 下一步
+只列一个最高价值实验
+```
+
+### 20.1 性能回归最小表
+
+| 字段            | 含义                                   |
+| :-------------- | :------------------------------------- |
+| environment_id  | GPU、驱动、CUDA、PyTorch、编译参数哈希 |
+| implementation  | 精确版本名                             |
+| shape/dtype     | M/N/K或rows/cols与dtype                |
+| contract        | 累加、输出、是否含转换                 |
+| median/P95      | 稳态统计                               |
+| correctness     | 最大/P99误差与测试版本                 |
+| baseline_commit | 基线代码版本                           |
+| change          | 相对基线百分比                         |
+| status          | pass、investigate、expected-change     |
+
+回归阈值必须结合噪声设定。例如历史波动P95为3%，就不能用1%作为通用失败阈值。性能退化先复测环境，再判断代码。
+
+---
+
+## 21. 阶段2原表格逐项覆盖
+
+| 原技术问题             | 必须达到的深度                                    | 教材位置          | 验收证据                              |
+| :--------------------- | :------------------------------------------------ | :---------------- | :------------------------------------ |
+| 输入和正确性协议       | FP32/FP16/BF16、真实/边界shape、累加与容差        | 模块1、17章       | shape matrix、误差报告、错误/回归测试 |
+| Naive访存模型          | load/FMA、FLOPs/bytes、算术强度                   | 模块2、14章       | 手写推导与NCU流量方向                 |
+| Shared tiling          | CTA tile、复用倍数、同步、shared和bank            | 模块3、14章       | naive/tiled受控对照                   |
+| Register tiling        | thread tile、shared复用、register与occupancy      | 模块4、14章       | 2×2/4×4编译和NCU对照                  |
+| Benchmark协议          | 固定环境、warmup、统计、baseline                  | 模块1、18章       | 一键benchmark与环境快照               |
+| Padding与bank conflict | 地址映射、conflict绝对量和Duration                | 模块5、14章       | padding有效或无效的因果结论           |
+| Vectorized access      | alignment、指令、transaction、尾部和fallback      | 模块5、14章       | N整除/非整除、对齐/非对齐对照         |
+| Register tile退化      | register、blocks/SM、eligible warp、stall和shape  | 模块4、19章       | 优化变慢的竞争假设复盘                |
+| Tensor Core            | FP16/BF16、FP32累加、fragment/layout、shape和指令 | 模块6、14/16章    | WMMA/Triton、fallback和MMA指令证据    |
+| 性能上限               | TFLOP/s、带宽、理论峰值、供应商库比例和适用范围   | 模块1/7、18章     | 多shape版本结果表                     |
+| Profiler因果链         | NSYS分层、NCU八步、绝对量、stall和Roofline        | 模块7、18/20章    | 完整主报告                            |
+| Triton或CUTLASS对照    | 修改config、同协议比较、开发效率与控制粒度        | 模块8、16章       | 非教程式Triton实现                    |
+| 第二算子迁移           | Softmax算法、读写、映射、精度、融合和Profiler     | 模块9、15/17/18章 | Softmax案例与一次NCU分析              |
+
+### 21.1 KER出口
+
+- [ ] KER-01：dtype、shape、stride、device、alignment和空输入契约完整。
+- [ ] KER-02：M/N/K尾部、非tile整数倍、小shape和奇数维度正确。
+- [ ] KER-03：累加dtype、容差、极值和误差分布明确。
+- [ ] KER-04：当前device/stream正确，无隐藏同步。
+- [ ] KER-05：向量路径不满足alignment时安全fallback。
+- [ ] KER-06：真实、边界、不规则、压力shape matrix完整。
+- [ ] KER-07：naive、PyTorch/供应商库和当前最佳基线同时保留。
+- [ ] KER-08：根据shape/dtype选择实现，不用一个配置覆盖所有输入。
+- [ ] KER-09：至少一条可修改config的非教程式Triton实现。
+- [ ] KER-10：API、测试、benchmark、profiling和文档闭环。
+
+### 21.2 GEMM出口
+
+- [ ] GEMM-01：能计算naive每输出load/FMA和算术强度。
+- [ ] GEMM-02：能推导shared tiling的global读取减少和同步点。
+- [ ] GEMM-03：能解释2×2/4×4如何改变shared读取和register。
+- [ ] GEMM-04：padding先算bank再实验，不套经验。
+- [ ] GEMM-05：vectorization有alignment、指令和尾部证据。
+- [ ] GEMM-06：FP16 WMMA和FP16/BF16 Triton使用FP32累加。
+- [ ] GEMM-07：能画CTA、warp/program、thread和MMA tile映射。
+- [ ] GEMM-08：能解释double buffering的load/compute overlap和资源代价；不要求本阶段手写。
+- [ ] GEMM-09：能计算有效TFLOP/s并诚实解释与cuBLAS差距。
+- [ ] GEMM-10：能分析小M、长条和不规则shape退化。
+
+### 21.3 PERF出口
+
+- [ ] PERF-01～04：测量协议、统计、受控变量和计时器全部固定。
+- [ ] PERF-05：NSYS能识别CPU gap、launch、同步、转换和拷贝。
+- [ ] PERF-06：NCU按八步问题树分析。
+- [ ] PERF-07：吞吐百分比与绝对工作量分开。
+- [ ] PERF-08：stall与eligible warp、资源、指令和源码联动。
+- [ ] PERF-09：cache/shared/DRAM同时看bytes、requests、sectors和Duration。
+- [ ] PERF-10：Roofline的FLOPs、bytes、dtype和层级定义正确。
+- [ ] PERF-11：用编译报告/PTX/SASS验证vector、MMA或spill中的至少一项。
+- [ ] PERF-12：固定shape、阈值、基线和历史结果建立性能回归。
+- [ ] PERF-13：至少保留一次反直觉或优化变慢案例。
+- [ ] PERF-14：报告完整回答变化、原因、证据、代价和边界。
+- [ ] PERF-15：能把相对吞吐提升换算为相同工作量下的GPU时间节省；服务成本留到入行后。
+
+### 21.4 Softmax出口
+
+- [ ] OPS-01：能推导组合式、片上融合和online算法的读写/状态。
+- [ ] OPS-02：能根据长短行选择warp/block映射。
+- [ ] OPS-03：能证明瓶颈是bandwidth、latency、launch或并行度中的哪一类。
+- [ ] OPS-04：能说明scale/mask融合的收益、语义和限制。
+
+阶段2选择Softmax作为第二算子时，不要求同时完成Norm、RoPE和Attention实现；它们留作后续迁移题。
+
+---
+
+## 22. 新人正式进入阶段3前的闭卷口试
+
+每个回答必须能指向自己的代码、推导或Profiler报告。
+
+1. `C=A×B`中M/N/K分别怎样进入地址和FLOPs？
+2. naive每个输出读取多少A/B，为什么真实DRAM bytes可能少于模型？
+3. TILE16怎样把代码级global读取理论减少16倍？
+4. tiled kernel两个barrier分别保护什么？
+5. 当前AB映射中padding为什么可能完全无效？
+6. 2×2 thread tile怎样减少shared读取？代价是什么？
+7. 4×4慢于2×2时，至少有哪些竞争假设？
+8. occupancy下降为什么不自动等于性能下降？
+9. float4改变了bytes、request、sector还是指令？怎样验证？
+10. M/N/K非tile整数倍分别怎样处理？
+11. CTA tile、warp tile、thread tile和MMA tile是什么关系？
+12. FP16、BF16、TF32的存储、范围、精度和累加有什么不同？
+13. 怎样证明实际用了Tensor Core，而不是只看源码？
+14. WMMA不规则shape为什么必须fallback？fallback成本怎样报告？
+15. Triton `BLOCK_M/N/K、GROUP_M、num_warps`分别控制什么？
+16. 为什么Triton首次调用与稳态时间必须分开？
+17. NSYS和NCU分别先回答什么问题？
+18. NCU八步问题树的顺序是什么？
+19. DRAM throughput百分比上升为什么仍可能变慢？
+20. stall分析为什么要先看eligible warp和issue slot？
+21. Roofline的横轴、纵轴和ridge point是什么？
+22. 有效TFLOP/s与实际执行指令数有什么区别？
+23. Online Softmax `(m,l)`怎样合并，为什么数值稳定？
+24. fused Softmax为什么可能慢于online？
+25. 你的最佳GEMM版本在哪些shape不适用，为什么？
+
+能够背出定义但不能给出本项目数字、shape和证据，仍未通过。
+
+---
+
+## 23. 课后题与参考答案
+
+### 23.1 `1024³` Naive GEMM手算
+
+**题目：** `M=N=K=1024`，block=`16×16`。
+
+**答案：**
+
+```text
+grid = (ceil(1024/16), ceil(1024/16)) = (64,64)
+blocks = 4096
+threads/block = 256
+总threads = 1,048,576
+warps/block = 8
+总warps = 32,768
+
+每thread：1024 FMA = 2048 FLOPs
+总有效FLOPs = 2 × 1024³ = 2,147,483,648 ≈ 2.147 GFLOPs
+
+naive代码级每输出流量 = 8×1024 + 4 = 8196 bytes
+全部输出约8.594 GB代码级读取/写入机会
+
+理想最低DRAM流量
+= 4 × (1024² + 1024² + 1024²)
+= 12,582,912 bytes ≈ 12.58 MB
+```
+
+8.594 GB不是预言的实测DRAM bytes；cache会复用。它展示naive代码与理想复用之间的空间。
+
+### 23.2 TILE16读取复用
+
+**题目：** 一个16×16输出tile、一个K=16分块，naive和tiled各产生多少A/B元素load？
+
+**答案：**
+
+```text
+naive：256输出 × 16A + 256输出 × 16B = 8192元素
+tiled：A tile 256 + B tile 256 = 512元素
+代码级减少 = 8192/512 = 16倍
+```
+
+### 23.3 Register tile输出范围
+
+**题目：** block固定16×16 threads。2×2和4×4每block输出多大C tile？
+
+**答案：**
+
+```text
+2×2：每thread 2×2，CTA输出(16×2) × (16×2) = 32×32
+4×4：每thread 4×4，CTA输出64×64
+```
+
+对同一M/N，2×2的block数约为普通16×16 tiled的1/4；4×4约为1/16。复用增加，但grid并行度和尾部利用率可能下降。
+
+### 23.4 不规则tile利用率
+
+**题目：** `M=123,N=145,K=67`，`TM=TN=32,TK=16`。
+
+**答案：**
+
+```text
+M覆盖 = ceil(123/32)×32 = 128
+N覆盖 = ceil(145/32)×32 = 160
+输出tile利用率 = 123×145 / (128×160) ≈ 87.1%
+
+K覆盖 = ceil(67/16)×16 = 80
+K利用率 = 67/80 = 83.75%
+
+三维粗略有效比例 ≈ 87.1% × 83.75% ≈ 72.9%
+```
+
+这个比例不等于性能比例，但能预测无效load/FMA和边界分支方向。
+
+### 23.5 当前tiled映射的Padding
+
+**题目：** 为什么`a_tile[16][17]`、`b_tile[16][17]`可能不比无padding版本快？
+
+**答案：** 当前访问中，warp对A常表现为同一行同一k的广播组，对B常表现为相邻tx或相同地址组，并不一定存在leading-dimension stride造成的严重bank conflict。padding增加shared占用，却可能没有减少conflict。必须以真实warp线性排列、访问地址和NCU conflict绝对量为准。
+
+### 23.6 Float4
+
+**题目：** `float4`是否把最低数学流量减少4倍？
+
+**答案：** 否。仍需读取相同A/B元素并写相同C元素。它可能把4条scalar load/store合成更宽指令，改变指令数和请求组织；sector/DRAM bytes未必减少。
+
+### 23.7 WMMA映射
+
+**题目：** 参考实现block=`dim3(32,4)`，每warp负责`16×16`输出。一个block输出什么范围？
+
+**答案：** 4个warp沿M方向各负责一个16×16 tile，因此一个block覆盖`64×16`输出区域。grid.x=`N/16`，grid.y=`ceil((M/16)/4)`；每个warp沿K执行`K/16`次MMA。
+
+### 23.8 理想GEMM算术强度
+
+**答案：** 对FP32理想每个A/B只读一次、C写一次：
+
+```text
+AI_ideal = 2MNK / [4(MK + KN + MN)]
+```
+
+方阵M=N=K=L且L很大时约为`L/6 FLOPs/byte`，随矩阵增大而提高；naive代码级模型却接近0.25，说明数据复用对GEMM至关重要。
+
+### 23.9 Online Softmax合并证明
+
+两段分别有：
+
+```text
+l1 = Σ(x属于段1) exp(x-m1)
+l2 = Σ(x属于段2) exp(x-m2)
+m = max(m1,m2)
+```
+
+把两段都改写到同一个m：
+
+```text
+Σ段1 exp(x-m) = exp(m1-m) × l1
+Σ段2 exp(x-m) = exp(m2-m) × l2
+```
+
+相加得到：
+
+```text
+l = l1×exp(m1-m) + l2×exp(m2-m)
+```
+
+所有指数的自变量不大于0，避免对大正数直接exp。
+
+### 23.10 Throughput反直觉
+
+**题目：** DRAM throughput从40%升到60%，Duration却变长，是否说明显存更忙所以更快？
+
+**答案：** 不能。可能是实际DRAM bytes增加，导致带宽利用率更高但工作更多；也可能其他瓶颈延长时间。必须同时比较绝对bytes、requests、sectors、有效FLOPs和Duration。
+
+---
+
+## 24. 最小术语表
+
+| 术语                   | 阶段2中的准确含义                                   |
+| :--------------------- | :-------------------------------------------------- |
+| GEMM                   | 通用矩阵乘，`C=A×B`                                 |
+| CTA tile               | 一个thread block负责的输出区域                      |
+| Warp tile              | CTA tile中由一个warp负责的区域                      |
+| Thread tile            | 一个thread在寄存器中累加的输出区域                  |
+| K tile                 | 每轮加载并参与乘加的K维分块                         |
+| Register tiling        | 每thread计算多个输出以复用shared数据                |
+| WMMA                   | CUDA C++的warp级矩阵乘加API                         |
+| MMA/HMMA               | 低层矩阵乘加指令族的泛称，具体名字依GPU代际         |
+| Fragment               | 一个warp协作持有的WMMA逻辑矩阵片段                  |
+| Leading dimension      | 相邻矩阵行/列起点在内存中的跨度                     |
+| Epilogue               | GEMM累加后写回前的缩放、bias、activation等阶段      |
+| Padding                | 改变片上数组leading dimension以调整bank映射         |
+| Double buffering       | 两套片上缓冲交替加载/计算以重叠数据搬运             |
+| Pipeline stage         | 软件流水中一轮load/compute所处阶段                  |
+| Effective TFLOP/s      | 按数学`2MNK`除以时间得到的有效吞吐                  |
+| Effective GB/s         | 按算法最低必要bytes除以时间得到的有效带宽           |
+| Roofline               | 用算术强度连接计算峰值与带宽峰值的上限模型          |
+| Ridge point            | 计算roof与带宽roof相交的算术强度                    |
+| Eligible warp          | 当前没有stall、可以被scheduler发射的warp            |
+| Warp stall             | warp因依赖、数据、同步或执行管线暂时不能发射        |
+| Wave tail              | 最后一波block不足以占满全部SM                       |
+| Shape sensitivity      | 同一实现性能随M/N/K结构变化的现象                   |
+| Autotune               | 对给定shape/dtype试验多个配置并选择结果             |
+| JIT                    | 运行时根据代码和参数编译                            |
+| Triton program         | Triton中负责一个数据tile的程序实例                  |
+| CUTLASS                | NVIDIA高性能线性代数CUDA C++模板库                  |
+| CuTe                   | CUTLASS中的layout、copy和MMA组合抽象                |
+| Online Softmax         | 用可合并 `(m,l)` 状态流式计算稳定Softmax统计量      |
+| Fused operator         | 在一个Kernel中完成多个数学步骤以减少中间读写/launch |
+| Performance regression | 固定协议下相对历史基线的性能退化                    |
+
+---
+
+## 25. 阶段2明确不解决什么
+
+- 不要求手写GEMM击败cuBLAS。
+- 不同时深入Triton、CUTLASS、CuTe、PTX和SASS五条主线；主流栈只选Triton落地。
+- 不学习Hopper/Blackwell专属TMA、WGMMA、cluster和persistent kernel细节。
+- 不把`--use_fast_math`作为免费性能开关；需要单独精度实验。
+- 不只测方阵和整齐shape。
+- 不删除慢版本、失败shape和反直觉数据。
+- 不把occupancy、带宽百分比、Tensor Core利用率中的任一项当作最终结论。
+- 不在正确性、测量协议和baseline未固定前开始调参。
+- 不把Triton首次JIT时间与稳态Kernel时间混为一谈。
+- 不在阶段2扩展到完整Attention、FlashAttention、vLLM或分布式推理。
+
+**阶段2的工作边界只有一句话：完成一个可复现的GEMM优化主案例和一个Softmax迁移案例，并能用数据证明每次变化为什么有效、无效或退化。**

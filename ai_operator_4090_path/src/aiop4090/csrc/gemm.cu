@@ -5,6 +5,8 @@
 #include <cuda_runtime.h>
 #include <mma.h>
 
+#include <cstdint>
+
 using namespace nvcuda;
 
 namespace {
@@ -211,7 +213,8 @@ __global__ void gemm_regtile4x4_kernel(const float* __restrict__ A,
 __global__ void gemm_vectorized_float4_kernel(const float* __restrict__ A,
                                               const float* __restrict__ B,
                                               float* __restrict__ C,
-                                              int M, int N, int K) {
+                                              int M, int N, int K,
+                                              bool b_aligned_16) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int base_col = (blockIdx.x * blockDim.x + threadIdx.x) * 4;
     if (row >= M) return;
@@ -220,7 +223,7 @@ __global__ void gemm_vectorized_float4_kernel(const float* __restrict__ A,
     float acc1 = 0.0f;
     float acc2 = 0.0f;
     float acc3 = 0.0f;
-    bool can_vectorize_b = (N % 4 == 0) && (base_col + 3 < N);
+    bool can_vectorize_b = b_aligned_16 && (N % 4 == 0) && (base_col + 3 < N);
 
     for (int k = 0; k < K; ++k) {
         float a = A[row * K + k];
@@ -279,8 +282,12 @@ void check_gemm_shape_and_device(const torch::Tensor& A, const torch::Tensor& B)
     CHECK_CUDA(B);
     CHECK_CONTIGUOUS(A);
     CHECK_CONTIGUOUS(B);
+    CHECK_SAME_DEVICE(A, B);
     TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "A and B must be 2D");
     TORCH_CHECK(A.size(1) == B.size(0), "A.shape[1] must equal B.shape[0]");
+    CHECK_DIM_FITS_INT(A, 0);
+    CHECK_DIM_FITS_INT(A, 1);
+    CHECK_DIM_FITS_INT(B, 1);
 }
 
 void check_gemm_inputs(const torch::Tensor& A, const torch::Tensor& B) {
@@ -300,88 +307,116 @@ void check_gemm_fp16_compatible_inputs(const torch::Tensor& A, const torch::Tens
 
 torch::Tensor gemm_naive(torch::Tensor A, torch::Tensor B) {
     check_gemm_inputs(A, B);
+    c10::cuda::CUDAGuard device_guard(A.device());
     int M = static_cast<int>(A.size(0));
     int K = static_cast<int>(A.size(1));
     int N = static_cast<int>(B.size(1));
     auto C = torch::empty({M, N}, A.options());
+    if (M == 0 || N == 0) return C;
+    if (K == 0) return torch::zeros({M, N}, A.options());
     dim3 block(16, 16);
     dim3 grid(ceil_div_int(N, block.x), ceil_div_int(M, block.y));
     gemm_naive_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         A.data_ptr<float>(), B.data_ptr<float>(), C.data_ptr<float>(), M, N, K);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return C;
 }
 
 torch::Tensor gemm_tiled(torch::Tensor A, torch::Tensor B) {
     check_gemm_inputs(A, B);
+    c10::cuda::CUDAGuard device_guard(A.device());
     int M = static_cast<int>(A.size(0));
     int K = static_cast<int>(A.size(1));
     int N = static_cast<int>(B.size(1));
     auto C = torch::empty({M, N}, A.options());
+    if (M == 0 || N == 0) return C;
+    if (K == 0) return torch::zeros({M, N}, A.options());
     dim3 block(TILE, TILE);
     dim3 grid(ceil_div_int(N, TILE), ceil_div_int(M, TILE));
     gemm_tiled_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         A.data_ptr<float>(), B.data_ptr<float>(), C.data_ptr<float>(), M, N, K);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return C;
 }
 
 torch::Tensor gemm_tiled_padding(torch::Tensor A, torch::Tensor B) {
     check_gemm_inputs(A, B);
+    c10::cuda::CUDAGuard device_guard(A.device());
     int M = static_cast<int>(A.size(0));
     int K = static_cast<int>(A.size(1));
     int N = static_cast<int>(B.size(1));
     auto C = torch::empty({M, N}, A.options());
+    if (M == 0 || N == 0) return C;
+    if (K == 0) return torch::zeros({M, N}, A.options());
     dim3 block(TILE, TILE);
     dim3 grid(ceil_div_int(N, TILE), ceil_div_int(M, TILE));
     gemm_tiled_padding_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         A.data_ptr<float>(), B.data_ptr<float>(), C.data_ptr<float>(), M, N, K);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return C;
 }
 
 torch::Tensor gemm_regtile2x2(torch::Tensor A, torch::Tensor B) {
     check_gemm_inputs(A, B);
+    c10::cuda::CUDAGuard device_guard(A.device());
     int M = static_cast<int>(A.size(0));
     int K = static_cast<int>(A.size(1));
     int N = static_cast<int>(B.size(1));
     auto C = torch::empty({M, N}, A.options());
+    if (M == 0 || N == 0) return C;
+    if (K == 0) return torch::zeros({M, N}, A.options());
     dim3 block(RT_TILE, RT_TILE);
     dim3 grid(ceil_div_int(N, RT_TILE * RN), ceil_div_int(M, RT_TILE * RM));
     gemm_regtile2x2_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         A.data_ptr<float>(), B.data_ptr<float>(), C.data_ptr<float>(), M, N, K);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return C;
 }
 
 torch::Tensor gemm_regtile4x4(torch::Tensor A, torch::Tensor B) {
     check_gemm_inputs(A, B);
+    c10::cuda::CUDAGuard device_guard(A.device());
     int M = static_cast<int>(A.size(0));
     int K = static_cast<int>(A.size(1));
     int N = static_cast<int>(B.size(1));
     auto C = torch::empty({M, N}, A.options());
+    if (M == 0 || N == 0) return C;
+    if (K == 0) return torch::zeros({M, N}, A.options());
     dim3 block(RT4_TILE, RT4_TILE);
     dim3 grid(ceil_div_int(N, RT4_TILE * RT4_RN), ceil_div_int(M, RT4_TILE * RT4_RM));
     gemm_regtile4x4_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         A.data_ptr<float>(), B.data_ptr<float>(), C.data_ptr<float>(), M, N, K);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return C;
 }
 
 torch::Tensor gemm_vectorized_float4(torch::Tensor A, torch::Tensor B) {
     check_gemm_inputs(A, B);
+    c10::cuda::CUDAGuard device_guard(A.device());
     int M = static_cast<int>(A.size(0));
     int K = static_cast<int>(A.size(1));
     int N = static_cast<int>(B.size(1));
     auto C = torch::empty({M, N}, A.options());
+    if (M == 0 || N == 0) return C;
+    if (K == 0) return torch::zeros({M, N}, A.options());
     dim3 block(16, 16);
     dim3 grid(ceil_div_int(N, block.x * 4), ceil_div_int(M, block.y));
+    bool b_aligned_16 = (reinterpret_cast<std::uintptr_t>(B.data_ptr<float>()) % 16) == 0;
     gemm_vectorized_float4_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
-        A.data_ptr<float>(), B.data_ptr<float>(), C.data_ptr<float>(), M, N, K);
+        A.data_ptr<float>(), B.data_ptr<float>(), C.data_ptr<float>(), M, N, K, b_aligned_16);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return C;
 }
 
 torch::Tensor gemm_wmma_fp16(torch::Tensor A, torch::Tensor B) {
     check_gemm_fp16_compatible_inputs(A, B);
+    c10::cuda::CUDAGuard device_guard(A.device());
     int M = static_cast<int>(A.size(0));
     int K = static_cast<int>(A.size(1));
     int N = static_cast<int>(B.size(1));
     auto C = torch::empty({M, N}, A.options().dtype(torch::kFloat32));
+    if (M == 0 || N == 0) return C;
+    if (K == 0) return torch::zeros({M, N}, A.options().dtype(torch::kFloat32));
 
     if (M % WMMA_M != 0 || N % WMMA_N != 0 || K % WMMA_K != 0) {
         torch::Tensor A_float = A.scalar_type() == torch::kFloat32 ? A : A.to(torch::kFloat32);
@@ -390,6 +425,7 @@ torch::Tensor gemm_wmma_fp16(torch::Tensor A, torch::Tensor B) {
         dim3 grid(ceil_div_int(N, TILE), ceil_div_int(M, TILE));
         gemm_tiled_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
             A_float.data_ptr<float>(), B_float.data_ptr<float>(), C.data_ptr<float>(), M, N, K);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
         return C;
     }
 
@@ -402,5 +438,6 @@ torch::Tensor gemm_wmma_fp16(torch::Tensor A, torch::Tensor B) {
         reinterpret_cast<const half*>(B_half.data_ptr<at::Half>()),
         C.data_ptr<float>(),
         M, N, K);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return C;
 }
