@@ -1,6 +1,6 @@
 # 阶段 2 正常掌握版教材：从“会写 CUDA”到“能优化并证明”
 
-> 版本：2.0，正常掌握、自包含教材版。  
+> 版本：2.1，正常掌握、自包含教材、概念与关系双维版。
 > 前置条件：已经通过阶段1，能够独立完成PyTorch CUDA Extension、Reduction、输入契约、测试和可信计时。  
 > 主案例：GEMM优化链。  
 > 迁移案例：Softmax。  
@@ -47,6 +47,245 @@ NCU验证Kernel内部假设
 ```
 
 已掌握的章节可以直接做章末闭卷自查和必做实验；两者都通过就记录证据并跳过。不能用“看过类似代码”代替实验结果。
+
+## 双维学习总入口：概念体系与性能因果关系
+
+阶段 2 不以“记住多少优化技巧”为目标，而以两种能力为目标：
+
+1. **基础概念维度**：知道每个性能概念的定义、计算方式、适用条件和证据来源。
+2. **概念关系维度**：能从代码变化推导工作量、访存、资源、调度、指标和 Duration 的变化，并识别其中的取舍与瓶颈迁移。
+
+如果只记得“Shared Tiling 会变快”“向量化能提速”，仍是技巧级理解；能说清在什么 shape、通过什么中间量、用什么指标证明、为什么也可能变慢，才达到阶段 2。
+
+### 维度一：阶段 2 基础概念地图
+
+| 概念组     | 基础概念                                             | 它首先回答的问题                                 | 正文出口         |
+| :--------- | :--------------------------------------------------- | :----------------------------------------------- | :--------------- |
+| 实验契约   | Shape、dtype、layout、精度、Baseline、统计协议       | 比较的版本是否真的完成同一个任务？               | 第 3、17、18 章  |
+| 有效工作量 | Effective FLOPs、最小 bytes、实际指令、实际传输      | “完成任务所需工作”与“硬件实际做的工作”有何区别？ | 第 4、9 章       |
+| 结果指标   | Duration、Latency、Throughput、TFLOP/s、有效 GB/s    | 这次优化最终是否让固定任务更快？                 | 第 3、9、18 章   |
+| 性能上限   | Arithmetic Intensity、峰值算力、带宽、Roofline       | 在理想条件下更可能受计算还是数据搬运限制？       | 第 4、9 章       |
+| 并行映射   | Grid、CTA、Warp、Lane、Wave、Tail、Tile 利用率       | Shape 怎样映射到硬件并行工作和浪费？             | 第 4、5、7 章    |
+| 数据复用   | Global、Shared、Register、CTA tile、Thread tile      | 怎样用片上存储减少重复 Global 访问？             | 第 5、6 章       |
+| 访存效率   | Coalescing、Alignment、Vectorization、Sector、Bank   | 有效 bytes 怎样变成实际内存请求与传输？          | 第 5、7、9 章    |
+| 资源限制   | Registers/thread、Shared/CTA、Threads/CTA、Occupancy | 一个 SM 能同时保留多少工作？                     | 第 5、6、9 章    |
+| 调度状态   | Active Warp、Eligible Warp、Issue Slot、Stall        | 驻留的 Warp 是否真的能持续发射指令？             | 第 6、9 章       |
+| 重叠与流水 | Load/Compute overlap、Stage、Barrier、依赖链         | 数据等待能否被别的工作或计算隐藏？               | 第 5、6、8 章    |
+| 低精度路径 | FP16、BF16、TF32、FP32 accumulate、Tensor Core、WMMA | 精度、布局和 Shape 怎样决定矩阵指令路径？        | 第 8 章          |
+| 工具证据链 | NSYS、NCU、Roofline、PTX、SASS、编译资源报告         | 应该在哪一层观察和验证性能假设？                 | 第 9、18 章      |
+| 算子迁移   | GEMM、Softmax、Norm、RoPE、Attention、KV Cache、量化 | 同一分析方法怎样迁移到不同计算和访存结构？       | 第 11、26～29 章 |
+| 生产工程   | CUDA、Triton、CUTLASS、Dispatch、Autotune、Fallback  | 多个实现怎样在不同输入和硬件上安全选择？         | 第 10、30 章     |
+| 系统衔接   | Kernel 时间、同步、Launch、端到端延迟、Amdahl 上限   | 单 Kernel 提速为什么不等于推理服务同比例提速？   | 本节、第 9 章    |
+
+每个概念统一用下面的“性能概念卡”记录：
+
+```text
+概念名称：
+它回答的性能问题：
+定义或计算公式：
+成立所需条件：
+它的上游变量：
+它影响的下游变量：
+代码中的控制位置：
+NSYS/NCU/PTX/SASS中的证据：
+最终怎样回到Duration：
+反例、代价或失效Shape：
+```
+
+阶段 2 的合格线不是会背定义，而是能从上游变量一路解释到最后三项。
+
+### 维度二：阶段 2 核心性能关系地图
+
+#### 关系链 A：一次可信优化的科学闭环
+
+```text
+冻结数学与 API 契约
+  → 固定 Shape matrix、dtype、精度和 Baseline
+  → 计算 Effective FLOPs 与最小 bytes
+  → 提出瓶颈预测和可证伪假设
+  → 一次只改变一个主要变量
+  → 先验证正确性
+  → 再测 Duration 与结果指标
+  → NSYS 判断时间落在哪一层
+  → NCU 判断 Kernel 内部发生了什么
+  → 必要时用 PTX/SASS 证明指令路径
+  → 写出结论、代价、适用边界和回归用例
+```
+
+这条链是全书主干。任何“优化后快了”的结论，如果跳过工作量、正确性、测量协议或对照实验，都还不能成为简历项目证据。
+
+#### 关系链 B：Tile 大小的完整取舍
+
+```text
+CTA/Thread Tile 增大
+  ├─ 可能提高 Shared/Register 复用 → Global 访问减少
+  ├─ 可能提高每线程工作量 → 指令级并行增加
+  ├─ 增加 Registers/thread 或 Shared/CTA → Blocks/SM 可能减少
+  ├─ 改变 Grid 数量与 Wave Tail → 小 Shape 并行度可能下降
+  └─ 增加边界浪费或 Padding → 不规则 Shape 的无效工作增加
+          ↓
+Eligible Warp、Stall、实际 bytes、实际指令共同变化
+          ↓
+固定 Shape 的 Duration 决定最终得失
+```
+
+因此 Tile 不是越大越好。选择 Tile 的本质是在“复用、并行度、资源、尾部浪费”之间做 Shape 相关的取舍。
+
+#### 关系链 C：从地址变化到实际内存效率
+
+```text
+数据 Layout + Lane 到元素的映射
+  → 字节地址的连续性与 Alignment
+  → 标量或 Vector Load/Store 指令
+  → Request/Sector 数量与 Cache 行为
+  → 实际 Global/DRAM bytes 和等待时间
+  → Eligible Warp、Memory Stall 与 Duration
+```
+
+`float4` 主要改变指令宽度和指令条数，并不自动减少算法最小 bytes；Alignment、尾部和实际生成的指令必须共同验证。Padding 也只有在改变目标 Bank 映射或对齐关系时才可能有效。
+
+#### 关系链 D：从复用到算术强度和 Roofline
+
+```text
+算子数学定义
+  → Effective FLOPs
+实现的数据读写方案
+  → 最小 bytes 与估计实际 bytes
+FLOPs / bytes
+  → Arithmetic Intensity
+AI 与峰值算力/带宽的交点
+  → Roofline 理论上限
+实测 TFLOP/s、GB/s、Duration
+  → 判断距离上限还有多远
+```
+
+Roofline 是宏观上限模型，不替代 NCU 的调度、指令和资源分析。AI 预测“可能更偏计算或带宽”，不能单独证明当前 Kernel 的实际瓶颈。
+
+#### 关系链 E：从资源到调度，而不是只看 Occupancy
+
+```text
+Registers/thread + Shared/CTA + Threads/CTA
+  → Blocks/SM 与 Active Warp 上限
+  → Occupancy
+  → 在指令依赖、Barrier、内存等待的约束下形成 Eligible Warp
+  → Scheduler 是否有 Warp 可 Issue
+  → Stall 分布与 Issue Slot 利用
+  → Duration
+```
+
+Active 表示 Warp 已驻留，Eligible 才表示当前周期具备发射条件。优化目标不是让 Occupancy 单项最大，而是让固定工作量更快，同时用 Eligible、Stall 和资源变化解释原因。
+
+#### 关系链 F：从低精度到 Tensor Core 路径
+
+```text
+输入 dtype 与允许误差
+  → 累加 dtype 和数值契约
+  → M/N/K、Layout、Leading Dimension、Alignment 约束
+  → WMMA/CUTLASS/Triton 配置与编译选择
+  → 是否生成并执行目标 Tensor Core 指令
+  → 实际吞吐、转换/搬运开销和数值误差
+  → 不满足条件时进入安全 Fallback
+```
+
+“输入是 FP16”不等于使用 Tensor Core。必须同时证明接口满足约束、指令路径正确、结果精度合格，并在不规则 Shape 上保留安全路径。
+
+#### 关系链 G：Profiler 的分层证据
+
+```text
+端到端或 Benchmark 变慢
+  → NSYS：CPU、Launch、Memcpy、同步还是 Kernel 时间？
+  → 若是 Kernel：NCU 看 Duration、Launch、SM/Memory、DRAM、Occupancy、Scheduler/Stall
+  → 若指令路径有疑问：PTX/SASS 或编译报告确认
+  → 回到源代码中能控制的 Tile、地址、资源、同步或 Dispatch
+  → 重跑同协议 Duration
+```
+
+工具的关系是“先分层、再下钻、最后回到结果”，不是把所有指标同时抄进报告。每个指标都必须对应一个待验证假设。
+
+#### 关系链 H：优化后的瓶颈迁移
+
+```text
+原瓶颈：重复 Global 读取
+  → Shared Tiling 减少读取
+  → 内存等待下降
+  → 新瓶颈可能变成同步、Shared 带宽、指令依赖或资源限制
+  → 再次测量并建立下一轮假设
+```
+
+这是原文需要集中补强的关系：优化不是消灭所有瓶颈，而是把限制推到下一层。每完成一个版本，都要问“旧瓶颈是否真的下降，新瓶颈迁移到了哪里”，不能永久沿用第一轮结论。
+
+#### 关系链 I：同一方法怎样迁移到不同算子
+
+```text
+统一入口：数学契约 → Shape → FLOPs/bytes → 并行映射 → 片上状态 → 同步 → 数值 → 证据
+  ├─ GEMM：重点是二维/三维 Tile、复用和矩阵指令
+  ├─ Softmax：重点是行归约、数值稳定和多遍读写
+  ├─ Norm：重点是统计量、稳定算法与融合
+  ├─ RoPE/SwiGLU：重点是逐元素访问和 Epilogue 融合
+  ├─ Attention：重点是中间矩阵 IO、Online 状态与 KV 访问
+  └─ 量化：重点是 Scale/Zero-point、反量化开销和低精度指令
+```
+
+迁移不是照搬 GEMM Tile，而是保留分析问题的顺序，再根据算子的数据依赖重新选择映射和片上状态。
+
+#### 关系链 J：从单 Kernel 到推理系统收益
+
+```text
+目标 Kernel 的原耗时占比 p
+  + Kernel 自身加速比 s
+  → Amdahl 上限：整体加速比 ≤ 1 / ((1-p) + p/s)
+  → 再叠加 Launch、同步、排队、Memcpy、其他算子和服务调度
+  → 最终 TTFT、TPOT、吞吐或端到端延迟变化
+```
+
+例如某 Kernel 占端到端时间 20%，即使自身无限快，整体理论加速也不超过 `1 / 0.8 = 1.25×`。这条关系用于衔接你后续的推理系统方向：Kernel Duration 是必要证据，但系统价值还取决于调用频率、时间占比和是否引入额外同步或数据搬运。
+
+#### 关系链 K：从多个实现到生产 Dispatch
+
+```text
+输入 Shape/dtype/layout/alignment + GPU 架构
+  → 判断实现约束是否满足
+  → Dispatch 到专用快路径或通用 Fallback
+  → Autotune 在代表性 Shape 上选择配置
+  → 正确性回归 + 性能回归
+  → 新 Shape 或新 GPU 触发重新评估
+```
+
+单一 Shape 上最快的 Kernel 不等于生产可用。阶段 2 最终要能解释“谁选择实现、选择依据是什么、约束不满足怎么办、性能退化怎样被发现”。
+
+### 五种关系必须同时掌握
+
+| 关系类型 | 要回答的问题                           | 合格示例                                                         |
+| :------- | :------------------------------------- | :--------------------------------------------------------------- |
+| 计算关系 | 指标怎样由 Shape、FLOPs、bytes 得到？  | GEMM Effective FLOPs 为 `2MNK`，有效 TFLOP/s 由它除以 Duration   |
+| 映射关系 | 数学维度怎样映射到 Tile、Warp 和地址？ | M/N 映射输出 Tile，K 映射分段累加与数据复用                      |
+| 因果关系 | 代码变化通过哪些中间量影响 Duration？  | Thread Tile 增大 → Shared 读取减少、寄存器增加 → 调度变化 → 时间 |
+| 取舍关系 | 收益同时带来了什么成本？               | 多级流水可能隐藏访存，也增加 Shared/寄存器、同步复杂度和尾部成本 |
+| 边界关系 | 结论在哪些 Shape、dtype 或硬件上失效？ | Tensor Core 快路径受 Layout、Alignment、K 维和架构支持约束       |
+
+### 双维闭卷自查：不要只回答“是什么”
+
+学习任一优化点后，关闭教材回答下面七项：
+
+1. 这个概念或技术解决哪个明确的性能问题？
+2. 它的定义、公式或硬件作用对象是什么？
+3. 它的上游控制变量位于 Shape、Layout 还是代码配置的哪里？
+4. 它通过哪些中间量影响实际执行和 Duration？
+5. 至少两个竞争假设是什么，怎样分别证伪？
+6. 用哪一层工具、哪个指标或哪段指令证明？
+7. 它的代价、失效 Shape、Fallback 和回归用例是什么？
+
+例如，不能只回答“向量化能减少指令”，而要形成完整回答：
+
+```text
+地址连续且满足Alignment
+  → 编译器生成宽Load/Store
+  → 每个线程的内存指令数可能减少
+  → 但算法最小bytes不变，尾部还需标量Fallback
+  → 检查SASS指令、request/sector、Duration与不规则Shape正确性
+```
+
+七项中任何一项无法回答，就按关系链回到对应前置章节。后文 25 道正式口试题仍是阶段出口；本节负责组织知识和暴露断点，不额外增加无限学习清单。
 
 ---
 
@@ -138,18 +377,18 @@ NCU验证Kernel内部假设
 
 ## 2. 最短学习顺序
 
-| 顺序 | 教材模块                      | 立即产出                       | 通过证据                        |
-| :--: | :---------------------------- | :----------------------------- | :------------------------------ |
-| 1    | 性能实验协议与可信基线        | 环境快照、shape matrix、基线表 | 同一输入重复结果稳定            |
-| 2    | GEMM数学、naive映射和性能模型 | naive kernel与手写FLOPs/bytes  | 推导与实测方向一致              |
-| 3    | Shared tiling                 | tiled kernel                   | global读取复用和同步点可解释    |
-| 4    | Register tiling与资源取舍     | 2×2、4×4版本                   | 能解释变快或变慢                |
-| 5    | Padding、向量化与不规则shape  | 三个受控实验和安全fallback     | 快路径和fallback均有测试        |
-| 6    | 低精度与Tensor Core           | FP16 WMMA、BF16/FP16 Triton    | 指令路径、精度和shape约束有证据 |
-| 7    | NSYS、NCU、Roofline和指令验证 | 一份完整Profiler因果报告       | 八步树能落到代码和Duration      |
-| 8    | Triton同协议对照              | 可修改tile/config的实现        | 与CUDA/cuBLAS公平比较           |
-| 9    | Softmax方法迁移               | 第二算子案例                   | 读写、归约、精度和瓶颈闭环      |
-| 10   | 报告、回归与闭卷复测          | 主报告、失败案例、性能回归     | 一周后不看教程仍能重写核心版本  |
+| 顺序  | 教材模块                      | 立即产出                       | 通过证据                        |
+| :---: | :---------------------------- | :----------------------------- | :------------------------------ |
+| 1     | 性能实验协议与可信基线        | 环境快照、shape matrix、基线表 | 同一输入重复结果稳定            |
+| 2     | GEMM数学、naive映射和性能模型 | naive kernel与手写FLOPs/bytes  | 推导与实测方向一致              |
+| 3     | Shared tiling                 | tiled kernel                   | global读取复用和同步点可解释    |
+| 4     | Register tiling与资源取舍     | 2×2、4×4版本                   | 能解释变快或变慢                |
+| 5     | Padding、向量化与不规则shape  | 三个受控实验和安全fallback     | 快路径和fallback均有测试        |
+| 6     | 低精度与Tensor Core           | FP16 WMMA、BF16/FP16 Triton    | 指令路径、精度和shape约束有证据 |
+| 7     | NSYS、NCU、Roofline和指令验证 | 一份完整Profiler因果报告       | 八步树能落到代码和Duration      |
+| 8     | Triton同协议对照              | 可修改tile/config的实现        | 与CUDA/cuBLAS公平比较           |
+| 9     | Softmax方法迁移               | 第二算子案例                   | 读写、归约、精度和瓶颈闭环      |
+| 10    | 报告、回归与闭卷复测          | 主报告、失败案例、性能回归     | 一周后不看教程仍能重写核心版本  |
 
 建议投入60～90小时。每周8～10小时通常需要8～10周；已经完成过相关实验时，以验收证据为准，不机械服从周数。
 
@@ -2879,8 +3118,8 @@ NSYS层级；NCU八步；绝对bytes/requests/sectors；资源；stall；指令
 2. naive每个输出读取多少A/B，为什么真实DRAM bytes可能少于模型？
 3. TILE16怎样把代码级global读取理论减少16倍？
 4. tiled kernel两个barrier分别保护什么？
-5. 当前AB映射中padding为什么可能完全无效？
-6. 2×2 thread tile怎样减少shared读取？代价是什么？
+5. 对比当前`gemm_tiled`与`gemm_tiled_padding`的A/B Shared Memory访问映射，padding为什么可能无效甚至制造bank conflict？怎样用lane地址和NCU证明？
+6. 2×2 thread tile怎样减少shared读取？代价是什么，怎样验证收益大于代价？
 7. 4×4慢于2×2时，至少有哪些竞争假设？
 8. occupancy下降为什么不自动等于性能下降？
 9. float4改变了bytes、request、sector还是指令？怎样验证？
@@ -2888,17 +3127,17 @@ NSYS层级；NCU八步；绝对bytes/requests/sectors；资源；stall；指令
 11. CTA tile、warp tile、thread tile和MMA tile是什么关系？
 12. FP16、BF16、TF32的存储、范围、精度和累加有什么不同？
 13. 怎样证明实际用了Tensor Core，而不是只看源码？
-14. WMMA不规则shape为什么必须fallback？fallback成本怎样报告？
+14. 当前教学WMMA实现在不规则shape上为什么选择fallback？还可采用哪些正确处理方案，fallback成本怎样报告？
 15. Triton `BLOCK_M/N/K、GROUP_M、num_warps`分别控制什么？
 16. 为什么Triton首次调用与稳态时间必须分开？
 17. NSYS和NCU分别先回答什么问题？
-18. NCU八步问题树的顺序是什么？
+18. NCU八步问题树的顺序是什么？每一步分别要排除哪类错误结论？
 19. DRAM throughput百分比上升为什么仍可能变慢？
 20. stall分析为什么要先看eligible warp和issue slot？
 21. Roofline的横轴、纵轴和ridge point是什么？
 22. 有效TFLOP/s与实际执行指令数有什么区别？
 23. Online Softmax `(m,l)`怎样合并，为什么数值稳定？
-24. fused Softmax为什么可能慢于online？
+24. 本文缓存整行的`softmax_fused`为什么可能慢于维护`(m,l)`状态的`softmax_online`？
 25. 你的最佳GEMM版本在哪些shape不适用，为什么？
 
 能够背出定义但不能给出本项目数字、shape和证据，仍未通过。
@@ -3347,17 +3586,33 @@ M决定A/C行数和输出行并行，N决定B/C列数和输出列并行，K是�
 
 少第一个会读未完成数据；少第二个会发生“下一轮写覆盖上一轮仍在读”的竞态。尾部线程不能在barrier前不一致return，应写identity/0并参加同步。
 
-### 33.5 Padding为什么可能完全无效
+### 33.5 当前Tiled GEMM的Padding为什么可能无效甚至变差
 
-Padding只在当前warp访问模式存在leading-dimension导致的bank conflict时有用。若A访问是同地址广播、B访问是连续列，原布局可能已无严重冲突；`[16][17]`不会减少任何冲突，却增加shared占用和地址跨度。
+Padding解决的不是“Shared Memory天然很慢”，而是同一个warp在同一条Shared指令中访问多个不同地址、这些地址却落到同一bank的问题。必须先根据当前Kernel的lane访问地址判断是否存在冲突，不能因为经典矩阵转置使用`[TILE][TILE+1]`，就直接给GEMM也加一列。
 
-正确流程是列出lane地址→计算bank→预测冲突→比较padding前后shared conflict绝对量和Duration。只看到经典transpose用`+1`，不能推导当前GEMM也会快。
+当前`gemm_tiled`使用`16×16`线程块。线性thread id以`threadIdx.x`优先递增，因此warp 0由`ty=0, tx=0..15`和`ty=1, tx=0..15`组成。以常见FP32、32个bank、每bank宽4字节的模型计算：
 
-### 33.6 2×2 Thread Tile怎样减少Shared读取
+```text
+bank(row, col) = (row × leading_dimension + col) % 32
+```
+
+- 合作写入`a_tile[ty][tx]`或`b_tile[ty][tx]`时，`[16][16]`布局中warp 0访问bank 0～31，原本没有冲突。
+- 计算读取`a_tile[ty][k]`时，每个半warp读取同一个地址，可走broadcast；两行对应两个不同bank。
+- 读取`b_tile[k][tx]`时，相同`tx`的两条lane读取同一地址，其余`tx`落在连续bank，也不是经典转置冲突。
+- 改为leading dimension 17以后，合作写入第二行映射到bank 17～31和0；其中第二行最后一个元素与第一行第一个元素可能形成同bank不同地址访问，反而可能产生2-way conflict。
+
+所以本项目里的`[16][17]`不能仅凭经验判定为优化。合格证据链是：
+
+1. 对目标Shared指令列出一个warp的lane、地址和bank编号。
+2. 区分同地址broadcast与同bank不同地址冲突。
+3. 用NCU比较padding前后的Shared Bank Conflicts、Wavefronts、Shared吞吐和绝对事务量。
+4. 最后比较相同shape和相同正确性条件下的Duration；冲突减少但Duration不降，也不能宣称优化成功。
+
+### 33.6 2×2 Thread Tile怎样减少Shared读取，代价怎样验证
 
 每线程累加2×2输出。每个K步只需读取2个A值和2个B值，就产生4次乘加；一线程一输出则每个输出分别读取对应A/B。A值在两个n输出间复用，B值在两个m输出间复用，单位输出的shared load下降。
 
-代价是4个accumulator和更多地址/临时变量增加register；CTA输出tile变大、grid block数减少；尾块浪费可能增大。收益需联动shared load、register、blocks/SM、grid和Duration。
+代价是4个accumulator和更多地址/临时变量增加register；CTA输出tile变大、grid block数减少；尾块浪费可能增大。验证时保持M/N/K、dtype、正确性和计时方法不变，对比tiled与2×2版本的Shared load指令/事务、Registers/Thread、spill、Blocks/SM、Achieved Occupancy、Eligible Warps和Duration。只有Shared读取下降后最终Duration也下降，才能证明收益大于资源代价。
 
 ### 33.7 4×4慢于2×2有哪些竞争假设
 
@@ -3401,27 +3656,48 @@ CTA tile是一个block负责的输出区域；其中划分多个warp tile；SIMT
 
 K tile描述每轮加载的归约维分块。合格回答要画自己的版本，标出block维度、warp数、M/N/K方向、A/B加载者和C持有位置，而不是只给定义。
 
+以本文`m16n16k16` WMMA教学版本为例：一个warp协作完成一个`16×16`输出warp tile；一个block包含4个warp，并让4个warp沿M方向排列，因此CTA tile覆盖`64×16`输出；K方向每次消费一个`K=16`的MMA tile，若`K=128`就循环8次。这里不能再说“每个thread固定计算某几个C元素”，因为WMMA fragment怎样分布到32条lane由实现决定。
+
+SIMT Register Tiling则不同。例如一个`16×16`线程块、每线程持有`2×2`输出时，thread tile是`2×2`，CTA输出tile是`(16×2)×(16×2)=32×32`；warp tile由warp中32个thread tile共同组成。这个例子说明四层tile是嵌套的工作划分，不是四个可以独立选择的数字。
+
 ### 33.12 FP16、BF16、TF32的差异
 
-FP16和BF16通常每元素2字节：FP16尾数相对更多但指数范围小；BF16指数范围接近FP32但尾数少。TF32通常以FP32接口/存储进入Tensor Core，乘法有效尾数精度降低，累加常为FP32；它不是2字节存储格式。
+必须从“数据怎样存储”和“硬件怎样计算”两个层面回答：
 
-必须分开写输入dtype、乘法路径、accumulator和输出dtype。低精度路径应以FP32 reference报告误差；K增长和输入范围会影响误差。
+- **FP16（IEEE binary16）：** 1位符号、5位指数、10位显式小数；占2字节。最大有限值为65504，最小正规格化正数为`2^-14`，1附近的间隔约为`2^-10`。它的有效精度高于BF16，但指数范围明显小于BF16/FP32，更容易上溢或下溢。
+- **BF16：** 1位符号、8位指数、7位显式小数；占2字节。指数范围接近FP32，但1附近的间隔约为`2^-7`，输入量化误差通常大于FP16。它用较少尾数精度换取了更大的动态范围。
+- **TF32：** 通常仍由FP32张量和FP32接口提供数据，内存中仍占4字节；Tensor Core乘法路径保留8位指数，并使用约10位显式小数的乘法精度，随后通常累加到FP32 accumulator。它不是一种可声明为2字节张量的独立存储dtype。
+
+“通常FP32累加”是所选MMA/WMMA/库路径的属性，不是仅由输入dtype自动保证。完整精度契约必须写成：
+
+```text
+输入/存储dtype → 乘法实际精度 → accumulator dtype → 输出dtype
+```
+
+例如本文WMMA路径是`FP16输入 × FP16输入 → FP32累加 → FP32输出`。即使使用FP32累加，也无法恢复FP16输入在进入Kernel前已经丢失的尾数。验证时应以FP32 reference报告max/mean/P99误差、NaN/Inf数量，并观察误差如何随K和输入范围变化。
 
 ### 33.13 怎样证明用了Tensor Core
 
-源码调用WMMA、`tl.dot`或库API只是意图。至少需要：
+源码调用WMMA、`tl.dot`或库API只证明“程序员希望使用Tensor Core”，不能证明最终生成的机器代码确实走了Tensor Core。证据强度从弱到强分为四层：
 
-1. 编译/反汇编证据显示目标架构的MMA/HMMA等矩阵乘加指令族。
-2. NCU相应Tensor/MMA管线或指令指标有工作。
-3. 性能/shape/dtype行为与Tensor Core约束一致，并与SIMT版本对照。
+1. **源码意图：** 存在`wmma::mma_sync`、`tl.dot`或相应库调用，只能作为定位入口。
+2. **编译条件：** 记录GPU、CUDA版本和目标架构；RTX 4090应确认生成了Ada对应的`sm_89`代码，而不是只保留不匹配的架构产物。
+3. **指令证据：** 在NCU Source/Disassembly或反汇编中找到该架构对应的MMA/HMMA矩阵乘加指令族。这是“执行路径确实存在”的直接证据，具体助记符会随GPU代际变化。
+4. **运行时证据：** NCU中的Tensor/MMA pipe指令或利用率指标必须出现非零工作，同时Profiler捕获的Kernel名称必须是WMMA快路径，而不是fallback Kernel。
 
-同时记录GPU架构和编译目标，因为具体指令名随代际变化。
+还要做一个SIMT对照，并记录相同shape下的Duration、有效TFLOP/s和数值误差。性能更快只能作为辅助证据：一个Kernel即使变快也不自动证明用了Tensor Core；反过来，看到MMA指令但因shape太小、转换或资源开销而变慢，也不能否认Tensor Core路径存在。
 
-### 33.14 WMMA不规则Shape为何Fallback
+### 33.14 当前WMMA实现为何选择Fallback
 
-WMMA fragment和load通常要求特定M/N/K tile、layout、leading dimension和地址边界。直接对不整齐尾块执行可能越界或把无效值参与计算。
+WMMA fragment和`load_matrix_sync`按固定M/N/K tile协作执行，所有参与warp的lane还必须以一致控制流进入WMMA操作。本文教学版本使用`m16n16k16`，没有为M/N输出尾块和K尾块准备安全的padding或tail路径；若直接让部分lane跳过或直接加载不完整fragment，可能越界，也可能把无效值参与计算。因此，**当前实现**只在M/N/K满足16倍数及其布局、leading dimension、地址约束时进入WMMA，其他shape路由到正确的通用Kernel。
 
-教学实现可仅在`M/N/K`满足16倍数和对齐时走WMMA，否则调用正确通用实现。报告要分开：纯WMMA快路径Kernel时间、dispatch开销、fallback时间以及真实shape覆盖率。不能把fallback的库调用算成手写WMMA性能。
+这不是“数学上的GEMM遇到不规则shape必须fallback”。至少还有三种正确方案：
+
+1. 把A/B/C临时padding到合法tile，WMMA计算后裁剪有效输出；代价是分配、填充、拷贝和无效FLOPs。
+2. 用WMMA处理完整的主体区域，再由SIMT tail Kernel处理M/N/K尾部；代价是多Kernel launch和边界组合复杂度。
+3. 建立多个特化Kernel或交给cuBLAS/CUTLASS等实现dispatch；代价是实现、编译和调度复杂度。
+
+报告必须把四个时间分开：纯WMMA快路径Kernel时间、Host dispatch开销、输入转换/padding等准备时间、fallback Kernel时间；同时记录真实shape中快路径命中率。不能把fallback的库调用时间标成“手写WMMA性能”，也不能只报告整齐shape而隐藏不规则shape的端到端成本。
 
 ### 33.15 Triton配置各控制什么
 
@@ -3444,23 +3720,20 @@ NSYS看时间线：CPU gap、launch、同步、拷贝、多个Kernel顺序、str
 
 NCU深入单Kernel：launch配置、寄存器/shared、访存层级、scheduler、stall、源码/指令和Roofline。正确顺序通常是先NSYS定位值得分析的Kernel，再用NCU验证内部假设。
 
-### 33.18 NCU问题树顺序
+### 33.18 NCU八步问题树
 
-教材主线：
+八步不是八个彼此独立的指标，而是一条从结果到原因、再回到结果的排查顺序：
 
-```text
-Duration/工作量可比
-→ Launch Stats与grid/block
-→ SM吞吐 vs Memory吞吐
-→ DRAM/L2/L1/Shared绝对bytes、requests、sectors
-→ Registers/Shared/Occupancy/Blocks per SM
-→ Eligible Warp、Issue Slot、Stall
-→ 源码与PTX/SASS指令
-→ Roofline宏观边界
-→ 回到Duration、代价和适用shape
-```
+1. **Duration与工作量：** 先确认shape、dtype、数学工作量、正确性、warmup和采样方法一致。否则后面的百分比不可比。
+2. **Launch Stats：** 看grid、block、wave数量和每个Kernel实际启动配置，先排除小grid、错误block或比较了fallback的问题。
+3. **SM吞吐与Memory吞吐：** 判断计算侧、访存侧或两侧都没有被充分利用，只用于确定下一步调查方向，不直接下“compute-bound/memory-bound”结论。
+4. **Memory层级：** 比较DRAM/L2/L1/Shared的绝对bytes、requests、sectors、命中和bank conflict，区分代码load、cache流量和真实DRAM流量。
+5. **片上资源与并发：** 查看Registers/Thread、Shared/Block、spill、Blocks/SM和Achieved Occupancy，判断资源是否限制驻留；不能把低Occupancy直接等同于慢。
+6. **Scheduler与Stall：** 先看Eligible Warps和Issue Slot是否不足，再分析Top Stall Reason，并把stall映射回依赖、访存、barrier或源码位置。
+7. **源码与指令：** 用Source/PTX/SASS确认向量load、MMA、spill、重复转换或额外控制指令是否真的生成和执行。
+8. **Roofline宏观边界：** 明确FLOPs和bytes口径，用Arithmetic Intensity、带宽roof和计算roof判断理论上限方向，并检查前面形成的因果解释是否合理。
 
-顺序的意义是避免一开始挑一个高百分比讲故事。Roofline是条件性宏观检查，不是自动最终判决。
+完成第8步后必须回到第1步的Duration，用最小代码改动复测。这个“回到Duration”是验证闭环，不作为第9步。顺序的意义是避免一开始挑一个高百分比讲故事；Roofline也是条件性宏观检查，不是自动最终判决。
 
 ### 33.19 DRAM Throughput上升但为何变慢
 
@@ -3499,21 +3772,63 @@ m = max(m1,m2)
 l = l1×exp(m1-m) + l2×exp(m2-m)
 ```
 
-因为`m≥m1,m2`，指数自变量都≤0，避免对大正数直接`exp`。最终输出为`exp(x-m)/l`。Identity可用`m=-inf,l=0`，但特殊值语义需测试。
+因为`m≥m1,m2`，对有限输入有`m1-m≤0`、`m2-m≤0`，从而避免对大正数直接`exp`。最终输出为`exp(x-m)/l`。逐元素更新其实是同一合并公式：把旧状态`(m_old,l_old)`与单元素状态`(x,1)`合并即可；分块、warp和block归约也都使用相同的结合规则。
 
-**证据：** 用两段手算与一次性stable softmax比较，再覆盖FP32/FP16/BF16、极值和非2次幂。
+空分段可把`(-inf,0)`作为逻辑identity，但实现不能无条件计算两个空identity的`exp(-inf-(-inf))`，因为该表达式会产生NaN。安全做法是携带valid标志，或在`l==0`时直接返回另一侧状态；两侧都空则直接返回identity。
 
-### 33.24 Fused Softmax为何可能慢于Online
+特殊值必须先定义契约：
 
-Fused版本若把整行FP32暂存在shared，可只读global输入一次，但shared需求随cols增长，可能降低occupancy、超过容量或增加片上访问/同步。Online版本通常读输入两次，却只保存每线程/warp统计状态，片上资源更小。
+- 有限输入应得到有限、非负输出，且每行和接近1。
+- 输入含NaN时，通常按reference传播NaN，不能把NaN静默变成普通概率。
+- 一行全为`-inf`时，数学上分母为0，常见reference会产生NaN；测试应明确跟随目标reference，而不是误判为数值不稳定Bug。
+- 输入含`+inf`时，`inf-inf`也需要明确语义；若要实现“多个`+inf`均分概率”，必须写成额外特化，不能声称来自普通stable-softmax公式。
 
-在长行、少rows或特定GPU上，Fused的资源代价可能超过少一次global读取的收益；exp吞吐和并行度也可能成为瓶颈。比较shared、blocks/SM、bytes、eligible warp和Duration，而不是只数global遍数。
+**证据：** 先用两个非空有限分段手算，与一次性stable softmax比较；再覆盖空分段、FP32/FP16/BF16、整体平移、极值、NaN/Inf和非2次幂列数，并记录max abs/rel error、行和误差和首个特殊值位置。
+
+### 33.24 本文Fused Softmax为何可能慢于Online
+
+这里的两个名称只指本文的两个具体实现，并不是说“fused”和“online”在一般概念上互斥：
+
+- `softmax_fused`把一整行输入转换成FP32后缓存到动态Shared Memory，随后从Shared完成max、exp-sum和输出。它通常只从Global读取输入一次，但Shared需求约随`cols×sizeof(float)`增长。
+- `softmax_online`不缓存整行，只为每个thread/warp保留`(m,l)`统计状态；第一次遍历输入得到全行状态，第二次再从Global读取输入并写出归一化结果。
+
+因此二者交换的是“少一次Global读取”和“更少片上存储”：
+
+1. 行较长时，`softmax_fused`的动态Shared可能降低Blocks/SM和Achieved Occupancy，甚至超过容量限制。
+2. Shared版本还会增加Shared读写、同步和bank访问；少一次Global读取并不等于总指令或总周期一定更少。
+3. 行较短但rows很少时，两者都可能受launch和grid不足主导，内存遍历次数不是主因。
+4. exp吞吐、reduction依赖链、Registers/Thread和Eligible Warps也可能成为真正限制。
+
+实验必须在相同shape、dtype和正确性条件下比较Global/DRAM/L2绝对bytes、Shared bytes/事务、Shared/Block、Blocks/SM、Registers/Thread、Eligible Warps、Top Stall Reason和Duration。不预设Online一定更快，也不能只凭“Global读取一遍或两遍”下结论。
 
 ### 33.25 最佳GEMM在哪些Shape不适用
 
 这题必须引用自己的最佳版本。常见限制包括：小M导致大CTA tile的grid不足；M/N/K不规则导致mask和无效计算；N/K不满足向量或WMMA倍数进入fallback；小矩阵受launch主导；极长条shape的数据复用方向不同；非对齐地址关闭float4；目标GPU代际改变资源和指令路径。
 
-合格答案格式：列出至少三个失败shape→说明预测原因→给benchmark/NCU证据→说明dispatch/fallback。不能只说“某些小shape不适用”。
+下面是一份作答模板。尖括号内容必须替换成自己的实测数据，不能把示例预测当成项目结论：
+
+```text
+我的最佳版本：<版本名>
+它在 <基准shape/dtype> 上的Duration为 <实测值>，
+相对 <对照版本> 的加速为 <实测值>。
+
+失败shape 1：M=16, N=4096, K=4096
+预测：若该版本使用较大的CTA输出tile，grid可能不足以填满RTX 4090的SM。
+证据：填写grid/block、waves、SM吞吐、Achieved Occupancy和Duration。
+处理：为小M dispatch到较小tile或库实现。
+
+失败shape 2：M=65, N=65, K=17
+预测：M/N输出尾块和K尾块使大量thread/FMA无效，有效工作利用率下降。
+证据：填写有效FLOPs、实际tile覆盖、Duration、分支/执行线程和load bytes。
+处理：选择较小tile、主体+tail Kernel或通用masked实现。
+
+失败shape 3：M=1024, N=1024, K=1025，或构造非16-byte对齐输入
+预测：WMMA/float4约束不满足，进入fallback或标量路径。
+证据：填写NSYS中的实际Kernel名称、向量/MMA指令是否出现、fallback时间和端到端Duration。
+处理：显式dispatch；若padding，则单独报告转换、padding和裁剪成本。
+```
+
+合格答案至少列出三个失败shape，并对每个shape完成“运行前预测→Benchmark结果→NCU/NSYS证据→根因→dispatch/fallback”。不能只说“某些小shape不适用”，也不能只列Profiler百分比而没有最终Duration。
 
 ### 33.26 复测标准
 
