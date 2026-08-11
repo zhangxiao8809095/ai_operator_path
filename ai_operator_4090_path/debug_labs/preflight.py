@@ -57,8 +57,15 @@ def find_tool(name: str, cuda_candidates: bool = False, override_var: str | None
 
 def host_checks() -> tuple[dict[str, Any], list[str]]:
     required_files = [
+        "scripts/00_check_env.sh",
+        "scripts/10_build.sh",
+        "scripts/15_verify_4090.sh",
+        "scripts/40_sanitize.sh",
         "scripts/50_debug_labs.sh",
+        "scripts/run_gemm_experiment.sh",
+        "scripts/run_operator_experiment.sh",
         "scripts/run_debug_experiment.sh",
+        "scripts/verify_workspace.py",
         "debug_labs/build_fault_lab.py",
         "debug_labs/diagnose_extension.py",
         "debug_labs/pipeline_trace.py",
@@ -70,11 +77,19 @@ def host_checks() -> tuple[dict[str, Any], list[str]]:
         "debug_labs/fault_extension/setup.py",
         "docs/operator_validation_experiments_4090.md",
         "tests/test_operator_validation.py",
+        "tests/test_sanitizer_smoke.py",
     ]
     missing_files = [relative for relative in required_files if not (ROOT / relative).is_file()]
     executable_files = [
+        "scripts/00_check_env.sh",
+        "scripts/10_build.sh",
+        "scripts/15_verify_4090.sh",
+        "scripts/40_sanitize.sh",
         "scripts/50_debug_labs.sh",
+        "scripts/run_gemm_experiment.sh",
+        "scripts/run_operator_experiment.sh",
         "scripts/run_debug_experiment.sh",
+        "scripts/verify_workspace.py",
         "debug_labs/preflight.py",
     ]
     non_executable_files = [
@@ -171,6 +186,7 @@ def gpu_checks() -> tuple[dict[str, Any], list[str]]:
 
     tools = {
         "nvcc": find_tool("nvcc", cuda_candidates=True),
+        "ncu": find_tool("ncu", cuda_candidates=True, override_var="NCU_BIN"),
         "nsys": find_tool("nsys", cuda_candidates=True, override_var="NSYS_BIN"),
         "compute-sanitizer": find_tool(
             "compute-sanitizer", cuda_candidates=True, override_var="COMPUTE_SANITIZER_BIN"

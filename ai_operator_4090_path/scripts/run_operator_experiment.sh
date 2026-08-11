@@ -9,7 +9,11 @@ EXPERIMENT=${1:-all}
 
 find_python_bin() {
   if [[ -n ${PYTHON_BIN:-} ]]; then
-    printf '%s\n' "$PYTHON_BIN"
+    local configured
+    configured=$(command -v "$PYTHON_BIN" 2>/dev/null || true)
+    if [[ -z "$configured" && -x "$PYTHON_BIN" ]]; then configured=$PYTHON_BIN; fi
+    [[ -n "$configured" ]] || return 1
+    printf '%s\n' "$configured"
     return
   fi
   local name candidate
@@ -45,13 +49,30 @@ append_log() {
 extract_ncu_evidence() {
   local output_file=$1
   local report_file=$2
-  local kernel_name=$3
-  {
-    printf '# Fixed eight metrics\n\n'
-    bash scripts/extract_ncu_metrics.sh "$report_file" "$kernel_name" 6
-    printf '\n# Supplemental metrics\n\n'
-    bash scripts/extract_ncu_supplemental_metrics.sh "$report_file" "$kernel_name" 6
-  } >"$output_file"
+  local kernel_candidates=$3
+  local temp_dir kernel_name
+  local -a candidates
+  temp_dir=$(mktemp -d)
+  IFS='|' read -r -a candidates <<<"$kernel_candidates"
+  for kernel_name in "${candidates[@]}"; do
+    if bash scripts/extract_ncu_metrics.sh "$report_file" "$kernel_name" 6 \
+        >"$temp_dir/fixed" 2>"$temp_dir/error" && \
+       bash scripts/extract_ncu_supplemental_metrics.sh "$report_file" "$kernel_name" 6 \
+        >"$temp_dir/supplemental" 2>>"$temp_dir/error"; then
+      {
+        printf '# Fixed eight metrics\n\n'
+        cat "$temp_dir/fixed"
+        printf '\n# Supplemental metrics\n\n'
+        cat "$temp_dir/supplemental"
+      } >"$output_file"
+      rm -rf "$temp_dir"
+      return
+    fi
+  done
+  cat "$temp_dir/error" >&2
+  rm -rf "$temp_dir"
+  echo "error: no NCU kernel candidate matched $report_file: $kernel_candidates" >&2
+  return 1
 }
 
 collect_ncu() {
@@ -261,9 +282,9 @@ run_attention_p01() {
   append_log "$log" "$PYTHON_BIN" benchmark/bench_ops.py --op attention \
     --csv reports/benchmark/attention.csv
   collect_ncu "$log" reports/attention/AT-P01-naive-causal.md \
-    attention_naive 'attention_naive_kernel<true>'
+    attention_naive 'attention_naive_kernel<true>|attention_naive_kernel<(bool)1>'
   collect_ncu "$log" reports/attention/AT-P01-naive-noncausal.md \
-    attention_naive_noncausal 'attention_naive_kernel<false>'
+    attention_naive_noncausal 'attention_naive_kernel<false>|attention_naive_kernel<(bool)0>'
   collect_ncu "$log" reports/attention/AT-P01-online-causal.md \
     attention_tiled_online_softmax attention_tiled_online_softmax_kernel
   collect_ncu "$log" reports/attention/AT-P01-online-noncausal.md \
@@ -277,11 +298,11 @@ run_attention_p02() {
   append_log "$log" "$PYTHON_BIN" benchmark/bench_ops.py --op attention \
     --csv reports/benchmark/attention.csv
   collect_ncu "$log" reports/attention/AT-P02-naive-s64.md \
-    attention_naive_s64 'attention_naive_kernel<true>'
+    attention_naive_s64 'attention_naive_kernel<true>|attention_naive_kernel<(bool)1>'
   collect_ncu "$log" reports/attention/AT-P02-online-s64.md \
     attention_tiled_online_s64 attention_tiled_online_softmax_kernel
   collect_ncu "$log" reports/attention/AT-P02-naive-s128.md \
-    attention_naive 'attention_naive_kernel<true>'
+    attention_naive 'attention_naive_kernel<true>|attention_naive_kernel<(bool)1>'
   collect_ncu "$log" reports/attention/AT-P02-online-s128.md \
     attention_tiled_online_softmax attention_tiled_online_softmax_kernel
   append_log "$log" bash scripts/profile_nsys.sh attention_tiled_online_softmax
@@ -305,11 +326,11 @@ run_attention_p04() {
   local log=reports/attention/AT-P04.log
   run_log "$log" "$PYTHON_BIN" -m pytest -q tests/test_operator_validation.py -k causal
   collect_ncu "$log" reports/attention/AT-P04-naive-causal.md \
-    attention_naive 'attention_naive_kernel<true>'
+    attention_naive 'attention_naive_kernel<true>|attention_naive_kernel<(bool)1>'
   collect_ncu "$log" reports/attention/AT-P04-naive-noncausal.md \
-    attention_naive_noncausal 'attention_naive_kernel<false>'
+    attention_naive_noncausal 'attention_naive_kernel<false>|attention_naive_kernel<(bool)0>'
   collect_ncu "$log" reports/attention/AT-P04-fixed-causal.md \
-    attention_causal_naive 'attention_naive_kernel<true>'
+    attention_causal_naive 'attention_naive_kernel<true>|attention_naive_kernel<(bool)1>'
   append_log "$log" bash scripts/profile_nsys.sh attention_naive
   append_log "$log" bash scripts/profile_nsys.sh attention_naive_noncausal
   append_log "$log" bash scripts/profile_nsys.sh attention_causal_naive

@@ -9,7 +9,11 @@ EXPERIMENT=${1:-all}
 
 find_python_bin() {
   if [[ -n ${PYTHON_BIN:-} ]]; then
-    printf '%s\n' "$PYTHON_BIN"
+    local configured
+    configured=$(command -v "$PYTHON_BIN" 2>/dev/null || true)
+    if [[ -z "$configured" && -x "$PYTHON_BIN" ]]; then configured=$PYTHON_BIN; fi
+    [[ -n "$configured" ]] || return 1
+    printf '%s\n' "$configured"
     return
   fi
   local name candidate
@@ -45,13 +49,30 @@ append_log() {
 extract_ncu_evidence() {
   local output_file=$1
   local report_file=$2
-  local kernel_name=$3
-  {
-    printf '# Fixed eight metrics\n\n'
-    bash scripts/extract_ncu_metrics.sh "$report_file" "$kernel_name" 6
-    printf '\n# GEMM supplemental metrics\n\n'
-    bash scripts/extract_ncu_supplemental_metrics.sh "$report_file" "$kernel_name" 6
-  } >"$output_file"
+  local kernel_candidates=$3
+  local temp_dir kernel_name
+  local -a candidates
+  temp_dir=$(mktemp -d)
+  IFS='|' read -r -a candidates <<<"$kernel_candidates"
+  for kernel_name in "${candidates[@]}"; do
+    if bash scripts/extract_ncu_metrics.sh "$report_file" "$kernel_name" 6 \
+        >"$temp_dir/fixed" 2>"$temp_dir/error" && \
+       bash scripts/extract_ncu_supplemental_metrics.sh "$report_file" "$kernel_name" 6 \
+        >"$temp_dir/supplemental" 2>>"$temp_dir/error"; then
+      {
+        printf '# Fixed eight metrics\n\n'
+        cat "$temp_dir/fixed"
+        printf '\n# GEMM supplemental metrics\n\n'
+        cat "$temp_dir/supplemental"
+      } >"$output_file"
+      rm -rf "$temp_dir"
+      return
+    fi
+  done
+  cat "$temp_dir/error" >&2
+  rm -rf "$temp_dir"
+  echo "error: no NCU kernel candidate matched $report_file: $kernel_candidates" >&2
+  return 1
 }
 
 run_c01() {

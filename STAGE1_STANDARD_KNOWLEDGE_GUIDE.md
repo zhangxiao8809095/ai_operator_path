@@ -2155,13 +2155,13 @@ CUDA_LAUNCH_BLOCKING=1 pytest -q tests/test_ops.py -k scaled_add
 6. occupancy 高为什么仍可能慢？register增加会产生什么连锁影响？
 7. 33个数怎样用多个 warp 做正确 reduction？
 8. 为什么 barrier 前不能让部分线程提前 return？
-9. FP16 和 BF16 的主要区别是什么？为什么 reduction常用FP32累加？
+9. FP16、BF16同为16-bit，它们的指数位、尾数位、动态范围和有效精度有何区别？在低精度reduction中，输入/存储dtype、运算dtype、累加dtype和输出dtype分别是什么？为什么常用FP32累加，它能减少哪些错误、又不能消除哪些误差，应怎样实验验证？
 10. `atol + rtol × abs(ref)` 分别解决什么问题？
 11. 为什么 CPU 直接包住 kernel launch 的计时通常是错的？
 12. PyTorch 当前 stream 与默认 stream 有什么区别？
 13. 非连续 Tensor、空输入、非对齐地址分别如何处理？
 14. 一次 illegal memory access为什么可能在后面的API才报错？
-15. 给定 B/S/H/heads，如何写出 QKᵀ 的 shape和FLOPs？
+15. 给定`B、H、query长度Sq、KV长度Skv、query heads数Nh`，怎样先求head维度`D`，再从Q/K分头后的shape推导`Kᵀ`和`QKᵀ`的shape？一个score元素包含多少乘法与加法，为什么常用FLOPs公式是`2×B×Nh×Sq×Skv×D`？该公式包含和不包含哪些Attention步骤，在self-attention、decode、GQA/MQA和causal实现中又怎样变化？
 16. 如何用 FLOPs/bytes判断一个算子的理论瓶颈方向？
 17. 一个性能优化结果至少要报告哪些统计量和环境信息？
 18. 你的两个工单各有哪些已知限制，为什么这些限制在阶段1可以接受？
@@ -2665,34 +2665,208 @@ Kernel必须使用`if (idx < N)`保护尾部。无效lane仍属于已launch线�
 
 ### 26.5 Shared地址怎样映射到Bank，Padding为何不一定有效
 
-概念公式：
+先把二维下标展开成线性地址。对按行存储的`T shared[ROWS][LD]`：
 
 ```text
-byte_address = element_index × sizeof(element)
-bank_id = (byte_address / bank_width) % bank_count
+element_index = row × LD + col
+byte_address  = shared_base + element_index × sizeof(T)
+bank_id       = floor(byte_address / bank_width) % bank_count
 ```
 
-同一warp访问不同地址却落到同一bank时会发生多路冲突；所有lane读同一地址通常可广播。二维数组的`element_index=row×leading_dimension+col`，因此leading dimension决定跨行/列访问的bank步长。
+在常用的教学模型“32个bank、bank宽4字节、`T=float`、基地址按4字节对齐”下，它可简化为：
 
-Padding把`[32][32]`改成`[32][33]`，可打破某些按列访问的32步循环；但如果原映射本来是连续访问或广播，就没有冲突可消除。Padding还增加shared占用，可能减少blocks/SM。
+```text
+bank(row, col) = (row × LD + col) % 32
+```
 
-**项目证据：** 先列出一个warp前8个lane的bank，再用冲突指标和Duration验证，而不是只看到`+1`就宣布优化。
+但bank conflict不是数组自身的属性，而是**同一warp的同一条shared-memory指令所产生的地址集合**的属性。要把每个lane的`row(lane)`和`col(lane)`代入公式，不能只看声明是`[32][32]`还是`[32][33]`。
+
+#### 例1：同一行连续访问，padding没有东西可优化
+
+若lane `k`访问`shared[r][k]`：
+
+```text
+bank(k) = (r × LD + k) % 32
+```
+
+`k=0..31`仍会覆盖32个不同bank。`LD=32`时如此，`LD=33`时也只是整体旋转bank编号，不会把“无冲突”变得更好。
+
+#### 例2：同一列跨行访问，`+1`才可能有效
+
+若lane `k`访问`shared[k][c]`：
+
+```text
+LD = 32: bank(k) = (k × 32 + c) % 32 = c
+         32个lane访问不同地址，却全落到bank c，是经典的32-way冲突
+
+LD = 33: bank(k) = (k × 33 + c) % 32 = (k + c) % 32
+         32个lane分布到32个bank，这个访问模式中padding有效
+```
+
+#### 例3：项目的`16×16` block中，`+1`甚至可能引入冲突
+
+CUDA中`threadIdx.x`先变化。对`blockDim=(16,16)`，一个warp的32个lane覆盖两行：
+
+```text
+row(k) = k / 16
+col(k) = k % 16
+
+LD = 16: element_index = (k/16) × 16 + k%16 = k
+         bank为0..31，没有冲突
+
+LD = 17: 第0行落到bank 0..15
+         第1行落到bank 17..31, 0
+         lane 0和lane 31的地址不同却都候选映射到bank 0
+```
+
+该项目的NCU对照也显示：`[16][16]`版本的shared store bank conflict为0，`[16][17]`版本反而出现2-way shared-store conflict且Duration增加。这正是“padding是否有效取决于warp的真实访问方向”的项目证据。
+
+还有三个边界需要同时判断：
+
+- 多个lane读取**同一个地址**通常走广播/多播，不能按“同bank”机械地判成冲突。
+- 上面的简化公式对FP32最直观；8字节或2字节访问还要考虑一次访问覆盖的bank、指令宽度和硬件拆分的transaction，最终以目标架构和Profiler为准。
+- Padding会增加shared占用，可能降低blocks/SM；也可能改变对齐或编译后指令数。即使conflict下降，也必须再看Duration才能宣布优化有效。
+
+**闭卷回答顺序：** 先写`row×LD+col`，再代入每个lane的`row/col`，然后区分“同地址广播”与“不同地址同bank”，最后用NCU的Bank Conflicts/Wavefronts和Duration验证。
 
 ### 26.6 Occupancy高为什么仍可能慢
 
-Occupancy表示active warps相对硬件上限的比例，它提供隐藏延迟的候选工作，但不说明warp是否eligible、每条指令效率或总工作量。
+这里的“慢”不是指Occupancy低、Stall百分比高或SM Throughput低，而是指**完成同一份有效工作需要更长时间**。对单个kernel，首先看同一shape、dtype和输出正确性下的CUDA Event/NCU `Duration`；对固定工作量，它等价于有效吞吐下降：
+
+```text
+GEMM有效吞吐 = 2 × M × N × K / Duration       （TFLOP/s）
+访存类有效带宽 = 完成任务所需的有效bytes / Duration（GB/s）
+```
+
+若工作目标是整个API或服务，则“慢”可改用端到端latency或tokens/s表示，但必须写清计时边界。不能把一个kernel的Occupancy与整个服务的latency直接对比。
+
+Occupancy表示active warps相对硬件上限的比例，它只说明SM上有多少候选warp可用于隐藏延迟，但不说明这些warp是否eligible、每条指令是否高效，也不说明为完成任务执行了多少额外工作。例如，所有active warps都在等待内存依赖，或bank conflict/spill使一次逻辑操作被拆成更多实际工作时，Occupancy可以很高，`Duration`仍然可以更长。
 
 增加register可能让每线程保留更多数据、提高复用和ILP；同时可能降低blocks/SM和occupancy。继续增加还可能spill到local memory，产生额外load/store。相反，强行限制register虽提高occupancy，却可能增加spill或重复计算。
 
-**正确因果链：** registers/thread → blocks/SM与active warps → eligible warps/issue → spill和数据复用 → Duration。最终结论不能停在occupancy百分比。
+**指标分工：** `Duration`、TFLOP/s、GB/s或端到端latency是最终结果指标；Occupancy、eligible warps、issue rate、stall reasons、bank conflicts和spill是解释结果的诊断证据。SM Throughput高只表示SM很忙，也可能是在忙着执行额外指令或等待受限的路径，不能单独当成“更快”。
+
+**正确因果链：** registers/thread → blocks/SM与active warps → eligible warps/issue → spill和数据复用 → Duration/有效吞吐。最终结论不能停在Occupancy或Stall百分比。
 
 ### 26.7 33个数怎样用多个Warp归约
 
-例如block有64线程：线程0～32各加载一个输入，33～63加载sum identity `0`。每个warp用shuffle完成32项归约，lane0得到warp partial；两个warp的lane0把partial写入shared；`__syncthreads()`后第一个warp读取两个partial，其余lane读0，再做一次warp reduction；lane0写最终结果。
+“归约”是一类操作：用合并函数`⊕`把多个输入压缩成一个结果，不是特指求和。例如：
 
-关键点是越界线程装载identity、warp partial写shared、barrier保证可见性、只有一个线程写输出。对max归约，identity应是负无穷而不是0。
+| 目标 | 合并操作`⊕` | identity（单位元） |
+| :--- | :--- | :--- |
+| sum | `a + b` | `0` |
+| product | `a × b` | `1` |
+| max | `max(a,b)` | `-∞` |
+| min | `min(a,b)` | `+∞` |
+| all | `a && b` | `true` |
+| any | `a || b` | `false` |
 
-**项目证据：** 测`cols=1/31/32/33/63/64/65`，与FP32 reference比较并运行racecheck。
+下面的33个数示例默认是**sum reduction**。例如block有64线程：
+
+```text
+thread 0..32 加载 x[0..32]
+thread 33..63 加载 sum identity 0
+        ↓
+每个warp内用 shuffle 和 `+` 做树形合并
+        ↓
+两个warp的 lane 0 把 warp partial sum 写入 shared
+        ↓
+__syncthreads()
+        ↓
+第一个warp的 lane 0..1 读两个 partial，其余 lane 读 0
+        ↓
+再做一次 warp sum reduction，lane 0 写最终和
+```
+
+对应的最小Kernel如下。启动约定是`reduce_sum_33_kernel<<<1, 64>>>(input, output)`，`input`至少有33个`float`，`output`至少有1个`float`：
+
+```cpp
+// __global__表示该函数由Host发起、在GPU上执行。
+// input指向33个待求和的float，output[0]用于保存最终结果。
+__global__ void reduce_sum_33_kernel(const float* input, float* output) {
+    // 一个block只有2个warp，因此只需保存两个warp的partial sum。
+    // __shared__使同一block的64个线程都能读写这个数组。
+    __shared__ float warp_sums[2];
+
+    // 取当前线程在block内的线性编号，启动约定下范围是0..63。
+    const int tid = threadIdx.x;
+
+    // warp有32个lane；tid对32取余得到当前线程的lane编号0..31。
+    const int lane = tid & 31;
+
+    // tid整除32得到warp编号：tid 0..31属warp 0，tid 32..63属warp 1。
+    const int warp_id = tid >> 5;
+
+    // 32个bit全为1，表示当前warp的32个lane都参与shuffle。
+    // 这里可以使用FULL_MASK，因为两次shuffle都由完整warp执行且无提前return。
+    constexpr unsigned FULL_MASK = 0xffffffffu;
+
+    // tid 0..32各读取一个真实输入：tids 33..63不能访问input，所以装载0。
+    // 0是sum的identity：它参与加法不会改变结果，又能让所有线程继续参与同步。
+    float value = (tid < 33) ? input[tid] : 0.0f;
+
+    // 第一级归约：两个warp各自在寄存器中计算partial sum。
+    // offset按16、8、4、2、1递减，每轮把已覆盖的数量翻倍。
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        // lane k读取同一warp内lane k+offset的value，再加到自己的value。
+        // 循环结束时，每个warp的lane 0持有该warp全32个lane的和。
+        value += __shfl_down_sync(FULL_MASK, value, offset);
+    }
+
+    // 只让每个warp的lane 0写入partial sum，避免多个lane重复写同一位置。
+    if (lane == 0) {
+        // warp 0写warp_sums[0]，warp 1写warp_sums[1]。
+        // 第二个值实际上就是input[32]，因为warp 1其他31个lane都装载了0。
+        warp_sums[warp_id] = value;
+    }
+
+    // block级barrier：等待64个线程都到达这里，并保证两次shared写入对后续读取可见。
+    // 若没有这一行，warp 0可能在warp 1写完warp_sums[1]之前就开始读取。
+    __syncthreads();
+
+    // 第二级只需warp 0执行；warp 1在barrier之后已经完成任务。
+    if (warp_id == 0) {
+        // lane 0读warp 0的partial，lane 1读warp 1的partial，其他lane装载sum identity 0。
+        value = (lane < 2) ? warp_sums[lane] : 0.0f;
+
+        // 再用同样的shuffle树形求和，把两个partial sum合并起来。
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            // 循环结束后，warp 0的lane 0持有全33个输入的最终和。
+            value += __shfl_down_sync(FULL_MASK, value, offset);
+        }
+
+        // 只有唯一的最终结果拥有者lane 0向global memory写一次，避免写冲突。
+        if (lane == 0) {
+            // 将input[0]+...+input[32]写到Host约定的输出位置。
+            output[0] = value;
+        }
+    }
+}
+```
+
+若改成max reduction，整体的“warp内归约 → 写warp partial → block同步 → 归约partials”骨架不变，但必须同时替换：
+
+```text
+合并操作：a + b  → max(a, b)
+无效lane填充：0 → -∞
+```
+
+不能只把`+`改成`max`却仍用0填尾部，否则全负数输入会错误地得到0。
+
+#### 哪些操作只需“换合并函数”，哪些需要改数据结构
+
+- sum/max/min/product等有合适identity、且可以树形合并的操作：并行归约骨架基本相同，更换`⊕`和identity即可。
+- argmax：每个lane保存`(value,index)`，合并时比较value并保留对应index，还要明确相等值时选较小还是较大index。
+- mean：不能对不同长度分块的平均值再直接取平均；应归约`(sum,count)`，最后再计算`sum/count`。
+- variance：通常归约`(count,mean,M2)`等复合状态，并使用Welford merge；不是单纯把`+`换成另一个符号。
+- softmax：可归约局部状态`(m,l)`，合并时需按新的最大值对指数和重缩放。
+- subtraction/division不满足常见树形归约所需的结合律，改变合并顺序会改变语义，不能直接套用这个并行骨架。
+
+严格来说，浮点加法也不满足数学上的完全结合律：`(a+b)+c`可能不等于`a+(b+c)`。因此并行sum与CPU串行sum可能有小的舍入差异，需用合理容差验证；若接口要求bitwise deterministic，还要固定归约顺序或使用专门算法。
+
+**不变的并行结构：** 越界线程装载当前操作的identity、warp partial写shared、barrier保证可见性、最后只有一个线程写输出。**会变的是：** 每个lane保存的状态、合并函数、identity、数值精度要求和最终后处理。
+
+**项目证据：** 对sum测`cols=1/31/32/33/63/64/65`，与FP32 reference比较并运行racecheck。若改成max，还必须加入“全负数”和重复最大值测试，用来验证identity与并列tie-breaking。
 
 ### 26.8 为什么Barrier前不能让部分线程提前Return
 
@@ -2702,13 +2876,92 @@ Occupancy表示active warps相对硬件上限的比例，它提供隐藏延迟�
 
 **常见误区：** 把`if(idx>=N) return`机械放在任何Kernel开头，而不检查后面是否有block barrier。
 
-### 26.9 FP16、BF16与FP32累加
+### 26.9 FP16/BF16的范围与精度怎样不同，为什么Reduction常用FP32累加
 
-FP16有较多尾数位但指数范围较小，容易溢出/下溢；BF16指数位接近FP32、范围较大，但尾数较少，单次表示精度更低。两者每元素通常2字节。
+**明确题目：** FP16、BF16同为16-bit，它们的指数位、尾数位、动态范围和有效精度有何区别？在低精度sum reduction中，请分别说明输入/存储dtype、运算dtype、accumulator dtype和输出dtype。为什么常用FP32累加？它能减少哪些溢出或舍入问题，又不能恢复哪些误差？请给出一组能隔离输入量化、累加误差和输出舍入的对照实验。
 
-Reduction会累积许多舍入误差，FP16范围也可能在长求和中溢出。因此常见路径是低精度读取→转换FP32→FP32累加→按接口决定FP32或低精度输出。
+#### 这道题具体考察什么
 
-**项目证据：** 比较随机、全相等、大数、小数和长归约；报告max/mean/P99误差、NaN/Inf数，不能只报告`allclose`通过。
+合格回答必须覆盖五个点：
+
+1. 能从指数位和尾数位解释“动态范围”与“表示精度”，而不只背“BF16范围大”。
+2. 能分清输入/存储dtype、运算dtype、accumulator dtype和输出dtype，不把“FP16输入”误说成“全程FP16”。
+3. 能说明长reduction中的溢出、小数被大数吞掉和逐步舍入误差，以及FP32累加为什么能改善它们。
+4. 知道FP32累加不能恢复输入量化时已丢失的信息，也不能保证结果绝对精确或bitwise一致。
+5. 能设计受控对照，用误差分布、NaN/Inf和最坏输入证明选择，不只说“FP32更准”。
+
+#### 1. 位宽怎样决定范围和精度
+
+| 格式 | 符号位 | 指数位 | 尾数存储位 | 1附近相邻数间隔 | 最小正规格正数 | 最大有限值 | 核心特点 |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| FP16 | 1 | 5 | 10 | `2^-10 ≈ 9.77e-4` | 约`6.10e-5` | `65504` | 在可表示范围内比BF16精细，但容易范围溢出 |
+| BF16 | 1 | 8 | 7 | `2^-7 ≈ 7.81e-3` | 约`1.18e-38` | 约`3.39e38` | 指数范围接近FP32，但相邻可表示数间隔更大 |
+| FP32 | 1 | 8 | 23 | `2^-23 ≈ 1.19e-7` | 约`1.18e-38` | 约`3.40e38` | 范围大且精度高，常作累加与reference基准 |
+
+指数位主要决定可表示数的尺度范围；尾数位主要决定同一尺度附近能分得多细。因此：
+
+- FP16比BF16多3个尾数位，在1附近的间隔约小8倍，所以通常表示精度更高。
+- BF16和FP32都有8个指数位，所以它们的数量级范围接近；这不表示BF16和FP32一样精确。
+- “范围大”回答的是能否表示极大/极小数，“精度高”回答的是附近的两个数能否被区分，两者不是同一件事。
+
+表中列的是最小正规格正数。Subnormal还能表示更小的数，但有效尾数位会逐渐减少；实际运算是否保留subnormal还要核对目标硬件与编译模式。
+
+#### 2. 一条低精度Reduction究竟有哪些dtype
+
+阶段1默认路径是：
+
+```text
+FP16/BF16 input存储
+    → 每个线程读取后转成FP32
+    → 线程局部求和、warp partial和block partial都用FP32
+    → 按API契约输出FP32，或最后一次转回FP16/BF16
+```
+
+所以必须分别回答：
+
+- **input/storage dtype：** 决定读入前数据已经以多少位存储，也决定了输入量化误差。
+- **arithmetic dtype：** 决定当前算术指令按什么精度执行。在本项目的纯sum路径中，输入先转成FP32，加法也以FP32执行。
+- **accumulator dtype：** 决定每次部分和的范围与舍入精度；本项目中是FP32。
+- **output dtype：** 由API契约决定。若输出低精度，最合理的FP32部分和在写出时仍会再舍入一次，甚至可能溢出。
+
+对纯sum reduction，没有乘法dtype；对dot/GEMM，还必须另外说明乘法输入精度与accumulator精度，不能用“FP32累加”推断乘法也是完整FP32精度。
+
+#### 3. 为什么常用FP32累加
+
+归约会进行多次加法，中间partial sum通常比单个输入大，并且每次加法都可能舍入。FP32累加主要改善：
+
+- **范围：** 例如两个FP16输入`40000 + 40000`。用FP16保存partial sum会超过`65504`；转成FP32后可以在accumulator中表示`80000`。
+- **精度：** accumulator越大，低精度中相邻数的绝对间隔越大，后续加入的小数可能不再改变partial sum。FP32的尾数更长，能显著减少这类“小数被大数吞掉”和长链舍入误差。
+
+这是精度与范围的折中，不是“使用了FP32就数学精确”。
+
+#### 4. FP32累加不能解决什么
+
+- 输入从FP32转成FP16/BF16时已经丢失的位无法恢复；转成FP32只是精确保存“量化后的低精度值”。
+- FP32加法仍然会舍入，而且不满足严格结合律；不同的并行归约树可能产生小的末位差异。
+- 正负大数相消造成的cancellation仍可能放大相对误差。
+- 若最后输出转回FP16/BF16，会再舍入；上述`80000`转回FP16时仍会变成Inf。
+- FP32累加只规定了accumulator，不自动证明Tensor Core/指令路径、输入转换时机或乘法精度；这些需要结合源码、编译结果和Profiler确认。
+
+#### 5. 怎样做能说明因果的实验
+
+先把同一份FP32输入转成FP16或BF16，然后使用**量化后的同一份输入**做对照：
+
+```text
+路径A：低精度input → 低精度accumulator → output
+路径B：低精度input → FP32 accumulator → FP32 output
+reference：量化后input → FP64或可接受的高精度求和
+```
+
+先固定input，才能把A/B的差异归因于accumulator，而不是输入量化不同。至少测：
+
+- `cols=1/31/32/33/255/256/257/4097`，观察误差如何随归约长度增长。
+- 全相等值，包括FP16长求和的范围溢出。
+- 大数与小数混合，观察小数是否被partial sum吞掉。
+- 正负混合和大数相消，观察归约顺序敏感性。
+- 分别使用FP32输出和低精度输出，隔离“累加误差”与“最终输出舍入”。
+
+**项目证据：** 报告max/mean/P99 absolute error、合理处理近零reference后的relative error、NaN/Inf数量、最坏shape和输入范围。源码中的FP32局部变量证明设计意图；若要声称具体硬件路径，再用Profiler/SASS证实。
 
 ### 26.10 `atol + rtol×abs(ref)`分别解决什么
 
@@ -2718,9 +2971,55 @@ Reduction会累积许多舍入误差，FP16范围也可能在长求和中溢出�
 abs(actual-ref) <= atol + rtol × abs(ref)
 ```
 
-`atol`给接近0的reference提供绝对误差底线，否则微小非零结果的相对误差会无限放大；`rtol`允许误差随reference尺度按比例增长。
+#### 先说每个符号是什么
+
+- `actual`：Kernel实际计算的结果。
+- `ref`：更可信的参考结果，例如PyTorch/FP32/FP64 reference。
+- `abs(actual-ref)`：本次实际产生的绝对误差。
+- `atol`：absolute tolerance，**绝对容差**。它是一个与ref大小无关的固定误差底线，单位与结果相同。
+- `rtol`：relative tolerance，**相对容差**。它是无单位的比例；`rtol × abs(ref)`把这个比例换算成当前ref尺度下允许的绝对误差。
+
+右边整体`atol + rtol×abs(ref)`是该元素的**最大允许绝对误差**。两项是相加，不是“满足atol或满足rtol任意一个”。
+
+#### `atol`解决接近0的值
+
+若`ref=0`，则相对项`rtol×abs(ref)=0`。此时只能由`atol`给出一个可接受的绝对误差范围：
+
+```text
+ref = 0
+atol = 1e-5
+rtol = 1e-3
+
+允许误差 = 1e-5 + 1e-3 × 0 = 1e-5
+actual = 8e-6  → 通过
+actual = 2e-5  → 不通过
+```
+
+没有`atol`时，近零reference即使只有很小的浮点误差，也可能被不合理地判错。
+
+#### `rtol`解决数值尺度变大
+
+同样的绝对误差，相对于`0.001`可能很大，相对于`1000`却可能很小。`rtol`让允许误差随`abs(ref)`按比例增长：
+
+```text
+ref = 100
+atol = 0.01
+rtol = 0.001                 // 允许0.1%的相对误差
+
+允许误差 = 0.01 + 0.001 × 100 = 0.11
+actual = 100.08  → abs(actual-ref)=0.08，通过
+actual = 100.20  → abs(actual-ref)=0.20，不通过
+```
+
+**一句话记忆：** `atol`是近零时的固定余量，`rtol`是随参考值变大的比例余量。
+
+#### 使用边界
 
 容差必须结合dtype、归约长度和reference路径制定。过严会拒绝合理浮点差异，过松会掩盖索引错误。还应单独检查NaN/Inf，因为普通比较可能产生误导。
+
+- `atol`和`rtol`是测试事先设定的标准，不是从当前失败结果反向放宽到刚好通过。
+- 该公式以`ref`为尺度，因此不是对称距离；交换`actual`和`ref`可能改变阈值。
+- 只看`allclose=True`不足以证明数值质量，还应报告max/mean/P99 absolute error、relative error和NaN/Inf数量。
 
 ### 26.11 为什么CPU直接包Kernel Launch计时错误
 
@@ -2732,21 +3031,272 @@ CUDA launch通常异步：CPU提交Kernel后立即继续，`t1-t0`主要测Host 
 
 ### 26.12 Current Stream与Default Stream
 
-Default stream是CUDA的一条特殊默认队列；PyTorch current stream是当前线程/设备上下文中框架正在使用的stream，可能是用户切换后的非默认stream。
+#### 1. Stream先是什么
 
-扩展若私自launch到错误默认stream，可能在输入尚未生产完成时读取，或迫使额外同步，破坏框架并发语义。正确做法是设置输入device guard并取得PyTorch current stream。
+CUDA stream可以理解为**一条按顺序排列GPU工作的命令队列**。CPU会把Kernel launch、异步内存拷贝和event等工作放入某条stream，然后通常不等GPU完成就继续执行Host代码。
 
-**验证：** 在自建stream中先异步生成输入，再调用扩展并记录event；不做全局同步，确认输出正确和依赖成立。
+可以把GPU想成一个厨房，把stream想成一张按顺序写好的出菜单：
+
+```text
+stream S:
+    1. 把输入拷到GPU
+    2. 运行kernel A产生x
+    3. 运行kernel B读取x并产生y
+```
+
+同一条stream中，GPU必须保证前面的工作先于后面的工作完成其可见效果。因此kernel B可以安全读取kernel A写出x，不需要在两者之间调用全局同步。
+
+Stream不是CPU thread，也不是一个Kernel；它是GPU工作的排序与依赖语义。
+
+#### 2. 多条Stream意味着什么
+
+不同stream中的工作在硬件资源和依赖允许时**可能**并发或重叠，但“放到不同stream”不保证一定同时执行。更重要的是，不能默认一条stream会等待另一条stream的普通工作：
+
+```text
+stream A: kernel A 写 x
+stream B: kernel B 读 x
+```
+
+若B依赖A，必须建立明确顺序，例如让B等待A上记录的CUDA Event，或使用PyTorch的`wait_stream`。否则B可能在A写完x之前就读取，造成竞态。
+
+#### 3. Default Stream是什么
+
+Default Stream是CUDA为每个设备提供的特殊stream。当代码没有显式选择其他stream时，GPU工作通常会提交到它。
+
+“default”只表示缺省选择，不表示它比其他stream更快或更正确。CUDA还有legacy default stream与per-thread default stream等模式，它们与其他stream的隐式同步规则不完全相同。阶段1不需要背完这些规则，但不能依赖模糊的“default stream应该会自动等”假设。
+
+#### 4. PyTorch Current Stream是什么
+
+PyTorch Current Stream是**PyTorch当前上下文为某个CUDA device选中的stream**。它初始时通常是default stream，但用户进入`torch.cuda.stream(s)`上下文后，current stream就会暂时变成`s`：
+
+```python
+s = torch.cuda.Stream()
+
+with torch.cuda.stream(s):
+    x = make_input_on_cuda()  # 提交到s
+    y = my_cuda_extension(x)  # 扩展也应提交到s
+```
+
+在这个例子中，`x`的生产和扩展对`x`的读取放在同一条stream `s`上，因此顺序自然正确。
+
+如果扩展忽略current stream，却私自launch到default stream，就变成：
+
+```text
+stream s:       生产x
+default stream: 读取x
+```
+
+这两件工作不再天然位于同一条有序队列中，可能在`x`尚未生产完成时读取，或因为隐式同步而丢失并发性能。所以PyTorch CUDA扩展应在正硤的device上取得并使用current stream，例如：
+
+```cpp
+at::cuda::CUDAGuard device_guard(input.device());
+cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+my_kernel<<<grid, block, 0, stream>>>(/* arguments */);
+```
+
+`CUDAGuard`负责选对输入所在的CUDA device，`getCurrentCUDAStream()`负责选对该device当前的工作队列。
+
+#### 5. Stream和同步的关系
+
+- 同一stream内：已有提交顺序，一般不需要在每个Kernel后调用全局同步。
+- 不同stream之间有依赖：用Event、`wait_stream`等显式建立顺序。
+- `stream.synchronize()`：Host等待该stream之前提交的工作完成。
+- `cudaDeviceSynchronize()`：Host等待该device上的工作，范围更大，调试时有用，但不应随意放进性能路径。
+
+**一句话记忆：** Stream是GPU工作的有序队列；Default Stream是CUDA的缺省队列，Current Stream是PyTorch此刻要你跟随的队列。
+
+**验证：** 在自建stream中先异步生成输入，再调用扩展并记录event；不做全局同步，确认输出正确和依赖成立。这个实验证明的是扩展遵守current-stream语义，不只是“在default stream上碰巧算对”。
 
 ### 26.13 非连续、空输入和非对齐怎样处理
 
-三类输入都应写入API契约：
+这三个词描述的不是同一件事：
 
-- 非连续Tensor：实现stride-aware索引，或在Host端明确拒绝；不要偷偷copy后把copy时间排除。
-- 空输入：返回正确shape的空输出并避免无意义/非法launch。
-- 非对齐：宽向量路径先检查基址、行跨度和尾部；不满足时进入标量或masked fallback。
+| 问题 | 它在问什么 | 典型风险 |
+| :--- | :--- | :--- |
+| 非连续 | 逻辑上相邻的元素，在storage中是否也相邻 | Kernel按错误地址读数，结果错却可能不越界 |
+| 空输入 | 是否根本没有元素，或某个归约维长度为0 | 零block launch、越界读取或输出shape/语义错误 |
+| 非对齐 | 某个地址是否为向量指令所需字节数的整数倍 | 强行向量load/store可能非法、被拆成更多transaction或读到尾部之外 |
 
-**项目证据：** 每类至少一条正确/错误测试，并明确错误信息或fallback路径。性能报告分别记录快路径和fallback。
+它们要分别判断。一个Tensor可以“连续但非16-byte对齐”，也可以“首地址16-byte对齐但逻辑布局不连续”。
+
+#### 1. 什么是非连续Tensor
+
+Tensor不只有shape，还有stride。Stride表示“某个维度的下标增加1时，需要在storage中跨过多少个元素”。对二维Tensor：
+
+```text
+真实element offset = row × stride[0] + col × stride[1]
+```
+
+例如：
+
+```python
+a = torch.arange(6).reshape(2, 3)
+# a = [[0, 1, 2],
+#      [3, 4, 5]]
+# shape=(2, 3), stride=(3, 1)，按行连续
+
+x = a.t()
+# x = [[0, 3],
+#      [1, 4],
+#      [2, 5]]
+# shape=(3, 2), stride=(1, 3)，逻辑上转置了，但storage没有重排
+```
+
+若Kernel无视stride，对`x[row][col]`仍使用连续假设：
+
+```text
+错误offset = row × cols + col
+```
+
+它会按`[[0,1],[2,3],[4,5]]`的顺序读取，而不是用户看到的`[[0,3],[1,4],[2,5]]`。这种错误往往仍在已分配storage范围内，所以可能不报illegal memory access，只是悄悄算错。
+
+##### 非连续输入有三种合法契约
+
+**方案A：明确拒绝。** Kernel只实现连续索引，launcher在取`data_ptr`之前检查：
+
+```cpp
+TORCH_CHECK(x.is_contiguous(), "x must be contiguous");
+```
+
+这是当前阶段1项目的选择。好处是Kernel简单，调用者也能清楚看到接口限制。
+
+**方案B：显式转成连续副本。**
+
+```cpp
+auto x_contiguous = x.contiguous();
+```
+
+这样可以复用连续Kernel，但非连续输入会多一次内存分配和数据拷贝。API若选择该契约，benchmark必须明确copy是否包含在计时中，不能偷偷copy后只报Kernel时间。
+
+**方案C：Kernel真正支持stride。** Host把stride传给Kernel，Kernel按逻辑坐标计算真实offset：
+
+```cpp
+int64_t offset = row * stride0 + col * stride1;
+float value = input[offset];
+```
+
+这不需要copy，但索引更复杂，且某些stride会让warp访问变得不合并。“支持正确”不等于“与contiguous一样快”。
+
+**项目结论：** 本项目选方案A：拒绝non-contiguous，并用错误测试证明契约；不能把非连续Tensor的`data_ptr`当成紧密一维数组使用。
+
+#### 2. 什么是空输入，为什么要在Launch前处理
+
+只要任意一个维度为0，Tensor的`numel()`就是0，例如`shape=(0, 7)`和`shape=(3, 0)`。它们都没有输入元素，但对行求和来说，输出语义不同：
+
+```text
+x.shape = [0, 7]
+没有任何行
+输出shape = [0]，返回空Tensor
+
+x.shape = [3, 0]
+有3行，但每行都没有数
+sum的identity是0
+输出shape = [3]，值为[0, 0, 0]
+```
+
+所以不能只写“`numel()==0`就随便返回空Tensor”，必须先按算子的数学定义推导输出shape和值。Sum空集合的identity是0，product是1。浮点max/min可分别把`-Inf/+Inf`当作identity，但整数dtype、argmax的index语义或框架API未定义初值时仍可能要求报错；必须与目标API契约对齐。
+
+还要在launch前提前返回，原因是：
+
+- Kernel不应解引用没有元素的`data_ptr`。
+- 常见grid公式`blocks=(n+threads-1)/threads`在`n=0`时得到0；启动零个block不是一个有意义的正常Kernel launch。
+- 即使可以安全绕过访存，也没必要为“什么都不做”支付launch开销。
+
+当前项目的Host端处理是：
+
+```cpp
+// 元素级scaled_add：输入是什么shape，输出就是什么shape。
+auto out = torch::empty_like(x);
+if (x.numel() == 0) {
+    return out;                         // 不launch Kernel
+}
+
+// 二维行sum：分开处理“没有行”与“行是空集合”。
+if (rows == 0) {
+    return torch::empty({0}, x.options());
+}
+if (cols == 0) {
+    return torch::zeros({rows}, x.options());
+}
+```
+
+**项目结论：** 空输入不是统一地“拒绝”或“返回空”；先定义算子语义，再在Host launcher中构造正确输出并避免Kernel launch。
+
+#### 3. 什么是地址对齐
+
+对齐的意思是“地址是某个字节边界的整数倍”。例如`float4`一次处理4个FP32，共16字节，因此向量路径通常要求首地址满足：
+
+```text
+address % 16 == 0
+```
+
+例如地址`0x1000`可被16整除，是16-byte aligned；`0x1004`只相差4字节，对FP32标量读取没问题，但不满足`float4`的16-byte对齐要求。
+
+为什么“contiguous”不能代替“aligned”？因为切片可以保持紧密布局，却改变首地址：
+
+```python
+base = torch.randn(1025, device="cuda", dtype=torch.float32)
+x = base[1:1025]
+
+assert x.is_contiguous()       # 元素仍然一个接一个
+assert x.data_ptr() % 16 != 0  # 首地址相对base偏移了4字节
+```
+
+向量化路径不只要检查首地址，还要检查访问范围：
+
+- `x/y/out`每个参与向量load/store的指针都要满足16-byte对齐。
+- 平铺`float4`路径需要`numel % 4 == 0`，否则最后不足4个元素的是尾部。
+- 行级向量化还要保证每行起点对齐。对contiguous FP32矩阵，`cols % 4 == 0`才能使下一行仍从16-byte边界开始。
+- 对齐只说明地址满足指令要求，不能代替边界检查；对齐的指针也可能在最后一次`float4`读取时越过分配范围。
+
+强行把不满足条件的`float*`解释成`float4*`不是“可能只慢一点”的正确fallback。它可能导致非法/非预期访问，也可能让一次访问跨越更多memory transaction。
+
+##### 正确的快路径/fallback选择
+
+```cpp
+bool aligned16 =
+    reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0 &&
+    reinterpret_cast<uintptr_t>(y.data_ptr()) % 16 == 0 &&
+    reinterpret_cast<uintptr_t>(out.data_ptr()) % 16 == 0;
+
+bool can_use_float4 =
+    x.scalar_type() == at::kFloat &&  // float4此处表示4个FP32
+    x.numel() % 4 == 0 &&             // 没有1..3个元素的尾部
+    aligned16;                        // 所有向量指针都16-byte对齐
+
+if (can_use_float4) {
+    // 快路径：每个线程使用float4处理4个元素。
+} else {
+    // 安全fallback：使用float标量load/store和普通idx<n边界判断。
+}
+```
+
+也可以设计“对齐的主体走向量路径，最后1～3个元素走标量tail”，但必须使用正确的元素索引和边界，不能让两条路径重复或漏算。
+
+**项目结论：** 标量基础Kernel不需要额外的16-byte对齐契约；`float4`练习只在基址、长度和行跨度都满足条件时走快路径，否则自动走标量fallback，不应报错或强行向量访问。
+
+#### 4. Launcher中的完整判断顺序
+
+```text
+1. 检查device、dtype、shape及多输入关系
+2. 检查layout契约：支持stride，还是拒绝non-contiguous
+3. 根据算子语义处理空shape，需要时直接返回，不launch
+4. 创建输出，选择正确device和current stream
+5. 若有向量快路径，检查dtype、所有基址、行跨度和tail
+6. 条件全部满足才launch快路径，否则launch安全fallback
+7. 做launch error check，保持正常异步语义
+```
+
+#### 5. 怎样用测试证明契约
+
+- **non-contiguous：** 使用`x = torch.randn(4,7,device="cuda").t()`，确认本项目抛出包含`contiguous`的明确错误。
+- **空元素算子：** 对scaled-add测shape `[0]`、`[2,0,3]`，确认输出shape/dtype/device与契约一致。
+- **空归约：** 对row-sum分别测`[0,7] → [0]`和`[3,0] → [0,0,0]`。
+- **非对齐但连续：** 用`base[1:]`制造`data_ptr()%16!=0`，确认进入标量fallback且结果正确。
+- **tail：** 使用元素数不能被4整除的shape，确认最后1～3个元素没有越界、丢失或重复计算。
+- **路径证据：** 测试正确性只能证明“算对”；还应通过调试标记、独立Kernel名称或Profiler确认aligned样例走快路径，misaligned/tail样例走fallback。
+
+**一句话记忆：** 非连续看stride，空输入看数学语义，非对齐看地址和访问宽度；三者都必须在launch前有明确契约。
 
 ### 26.14 Illegal Memory Access为何延迟报错
 
@@ -2756,22 +3306,264 @@ Kernel launch异步，Host提交时只完成参数入队。GPU稍后执行到越
 
 ### 26.15 Attention中QKᵀ的Shape和FLOPs
 
-若Q/K已整理为：
+**明确题目：** 给定batch size `B`、hidden size `H`、query长度`Sq`、KV长度`Skv`和query head数`Nh`，先计算每个head的维度`D`，再从Q/K分头后的shape推导`Kᵀ`及attention scores的shape。随后从“输出元素个数 × 每个点积的运算量”推导`QKᵀ` FLOPs，并说明该公式的计数范围。最后解释self-attention、decode、GQA/MQA和causal mask分别改变哪个维度或计数。
+
+#### 这道题具体考察什么
+
+合格回答需要覆盖以下六点：
+
+1. 知道`H`、head数`Nh`和head dimension `D`的关系，并检查`H % Nh == 0`。
+2. 能从`[B,S,H]`推到`[B,Nh,S,D]`，知道“分head”不是丢掉或新增元素。
+3. 知道`Kᵀ`只交换K最后两个矩阵维度`[Skv,D] → [D,Skv]`，batch和head维不动。
+4. 能解释scores的每个元素代表“一个query位置与一个key位置在某个head中的D维点积”。
+5. 能从点积推导FLOPs，而不是死背`2BNS²D`。
+6. 能明确公式只计算`QKᵀ`，并区分逻辑有效FLOPs和Kernel实际执行FLOPs。
+
+这题不要求在阶段1推导完整FlashAttention或反向传播；重点是shape、点积和计数边界。
+
+#### 1. 先定义每个符号
 
 ```text
-Q: [B, heads, Sq, D]
-K: [B, heads, Skv, D]
-Kᵀ: [B, heads, D, Skv]
-Scores: [B, heads, Sq, Skv]
+B：batch size
+H：模型hidden size
+Nh：query/attention head数量
+D：每个head的维度；普通MHA中 D = H / Nh
+Sq：query token数量
+Skv：key/value token数量
 ```
 
-每个score对D维做点积，乘加按2 FLOPs计：
+必须先检查：
 
 ```text
-FLOPs_QK = 2 × B × heads × Sq × Skv × D
+H % Nh == 0
 ```
 
-GQA/MQA中Q heads与KV heads不同，需要把Q head映射到共享KV head，但输出Scores仍按Q heads计。Causal mask会减少有效区域，但朴素实现可能仍计算完整矩阵。
+否则无法把`H`均匀拆成`Nh`个相同大小的head。普通self-attention中`Sq=Skv=S`；cross-attention、带KV cache的decode或其他非对称场景中，`Sq`和`Skv`可以不同。
+
+#### 2. Q和K是怎样变成多头Shape的
+
+先看普通MHA。Q投影后的逻辑shape通常是：
+
+```text
+Q projection output: [B, Sq, H]
+H = Nh × D
+reshape:             [B, Sq, Nh, D]
+transpose/reorder:   [B, Nh, Sq, D]
+```
+
+K同理：
+
+```text
+K projection output: [B, Skv, H]
+reshape:             [B, Skv, Nh, D]
+transpose/reorder:   [B, Nh, Skv, D]
+```
+
+`reshape`只是把最后一个`H`拆成`Nh×D`；随后交换head维与sequence维，使每个batch、每个head都能看到一张独立矩阵。
+
+因此分头后的Q和K是：
+
+```text
+Q: [B, Nh, Sq,  D]
+K: [B, Nh, Skv, D]
+```
+
+#### 3. Kᵀ到底转置什么，QKᵀ为什么得到这个Shape
+
+这里的转置不是把整个四维Tensor倒过来，而是只交换K最后两个矩阵维度：
+
+```text
+K:  [B, Nh, Skv, D]
+Kᵀ: [B, Nh, D, Skv]
+```
+
+`B`和`Nh`是batched matrix multiplication的批次维。对固定的batch `b`和head `h`，真正相乘的是：
+
+```text
+Q[b,h]:  [Sq, D]
+Kᵀ[b,h]: [D, Skv]
+          ─────────
+Scores:   [Sq, Skv]
+```
+
+把所有batch和head放回来：
+
+```text
+Scores = Q @ K.transpose(-2, -1)
+Scores shape = [B, Nh, Sq, Skv]
+```
+
+每个元素的定义是：
+
+```text
+Scores[b,h,i,j]
+    = Σ(d=0..D-1) Q[b,h,i,d] × K[b,h,j,d]
+```
+
+所以`Scores[b,h,i,j]`表示：第`b`个样本、第`h`个head中，第`i`个query token和第`j`个key token的未缩放相似度。
+
+一个常见错误是把输出写成`[B,Nh,Sq,D]`。这是后面的`softmax(Scores) @ V`输出shape；`QKᵀ`本身的最后一维是key位置`Skv`，不是head维度`D`。
+
+#### 4. FLOPs怎样一步步推导
+
+先数输出元素：
+
+```text
+Scores元素数 = B × Nh × Sq × Skv
+```
+
+每个score元素是长度`D`的点积：
+
+```text
+D次乘法
+D-1次加法
+精确标量计数 = 2D - 1 FLOPs
+```
+
+性能分析通常把一次multiply-add/FMA按2 FLOPs计算，并忽略最后少一次加法，于是每个点积近似为`2D` FLOPs：
+
+```text
+FLOPs_QK
+≈ 输出元素数 × 每个元素的点积FLOPs
+= (B × Nh × Sq × Skv) × (2D)
+= 2 × B × Nh × Sq × Skv × D
+```
+
+若题目要求严格的朴素标量运算次数，可写：
+
+```text
+Exact scalar FLOPs = B × Nh × Sq × Skv × (2D - 1)
+```
+
+但GPU性能报告通常使用约定公式`2×B×Nh×Sq×Skv×D`，因为硬件FMA按乘法与加法各1 FLOP计算。
+
+#### 5. 用一组数字完整计算
+
+给定：
+
+```text
+B = 2
+Sq = Skv = S = 128
+H = 768
+Nh = 12
+```
+
+先算：
+
+```text
+D = H / Nh = 768 / 12 = 64
+
+Q  = [2, 12, 128, 64]
+K  = [2, 12, 128, 64]
+Kᵀ = [2, 12, 64, 128]
+Scores = [2, 12, 128, 128]
+```
+
+再算FLOPs：
+
+```text
+FLOPs_QK
+= 2 × 2 × 12 × 128 × 128 × 64
+= 50,331,648 FLOPs
+≈ 50.3 MFLOPs
+```
+
+可用最小PyTorch shape实验核对：
+
+```python
+import torch
+
+B, Nh, Sq, Skv, D = 2, 12, 128, 128, 64
+q = torch.randn(B, Nh, Sq, D, device="cuda")
+k = torch.randn(B, Nh, Skv, D, device="cuda")
+scores = q @ k.transpose(-2, -1)
+assert scores.shape == (B, Nh, Sq, Skv)
+```
+
+该实验只验证shape和运算定义，不等于证明某个自定义Kernel的实际指令路径或性能。
+
+#### 6. 这个FLOPs公式包含什么、不包含什么
+
+`2×B×Nh×Sq×Skv×D`只表示`QKᵀ`这一次batched matrix multiplication的常用算法FLOPs。它不包含：
+
+- 从输入`X`生成Q/K/V的线性projection。
+- Q/K的reshape、transpose或实际layout copy。
+- 对scores乘`1/sqrt(D)`的缩放。
+- 添加causal/padding mask。
+- softmax、dropout。
+- `softmax(Scores) @ V`。
+- output projection。
+
+其中scale大约还会对每个score做一次乘法；mask和softmax有自己的操作量。做性能报告时必须明确报告的是“仅QK Kernel”还是“完整Attention端到端”，不能把两者的时间与同一个FLOPs分子混用。
+
+#### 7. Self-Attention、Decode、GQA/MQA和Causal怎样变化
+
+**普通self-attention：**
+
+```text
+Sq = Skv = S
+Scores shape = [B, Nh, S, S]
+FLOPs ≈ 2 × B × Nh × S² × D
+```
+
+这里的`S²`来自每个query位置都与每个key位置配对。
+
+**带KV cache的单token decode：**
+
+```text
+Sq = 1
+Skv = 当前KV cache长度
+Scores shape = [B, Nh, 1, Skv]
+FLOPs ≈ 2 × B × Nh × Skv × D
+```
+
+因此decode的QK计算量对当前cache长度近似线性增长，而不是对`Skv`平方增长。Prefill通常有多个query token，self-attention时才表现为`S²`。
+
+**GQA/MQA：**
+
+设query heads为`Nq`，KV heads为`Nkv`，通常`Nq % Nkv == 0`。多个query head共享一个K/V head：
+
+```text
+Q: [B, Nq,  Sq,  D]
+K: [B, Nkv, Skv, D]
+Scores after head mapping: [B, Nq, Sq, Skv]
+FLOPs ≈ 2 × B × Nq × Sq × Skv × D
+```
+
+最终scores按query heads `Nq`计数，因为每个query head仍要产生自己的score矩阵。`Nkv`减少主要降低K/V projection、KV cache容量和读取量；它不会直接把score输出的head维从`Nq`改成`Nkv`。MQA是`Nkv=1`的特殊情况。
+
+只给`H`和`Nh`不足以完整描述GQA，还必须知道`Nq`、`Nkv`及head映射规则。
+
+**Causal self-attention：**
+
+逻辑上，第`i`个query只能看不晚于自己的key。若Kernel真正跳过上三角，允许的query-key对数是：
+
+```text
+S × (S + 1) / 2
+```
+
+相应的有用FLOPs近似为：
+
+```text
+2 × B × Nh × D × S(S+1)/2
+```
+
+但许多朴素实现仍计算完整`S×S`分数后再加mask，这时Kernel实际执行的QK FLOPs仍接近完整公式。不能仅因语义上是causal就直接把Profiler中的实际FLOPs除以2；必须看实现是否真的跳过被mask区域。
+
+#### 8. 闭卷回答顺序
+
+```text
+先写 D = H / Nh
+→ 写 Q/K 分头后的shape
+→ K只转置最后两维
+→ 写 Scores = [B,Nh,Sq,Skv]
+→ 数输出元素 B×Nh×Sq×Skv
+→ 每个元素是长度D的点积，约2D FLOPs
+→ 得到 2×B×Nh×Sq×Skv×D
+→ 最后声明公式边界及self/decode/GQA/causal变化
+```
+
+**项目证据：** 至少保留一组手算shape和FLOPs，用PyTorch matmul核对输出shape；若报告自定义Kernel的Achieved TFLOP/s，则用同一shape的约定FLOPs除以CUDA Event/NCU `Duration`，并明确是否实际计算完整causal矩阵。
 
 ### 26.16 怎样用FLOPs/Bytes判断理论瓶颈
 

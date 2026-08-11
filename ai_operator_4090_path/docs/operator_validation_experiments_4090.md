@@ -72,11 +72,24 @@ NaN / +Inf / -Inf 数量
 pwd
 git rev-parse HEAD
 git status --short
+python scripts/verify_workspace.py
 bash scripts/00_check_env.sh
-python -m venv .venv
+python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
+bash scripts/00_check_env.sh --strict
 bash scripts/10_build.sh
 ```
+
+`--system-site-packages`用于复用租赁镜像中已经安装的CUDA版PyTorch。若镜像没有CUDA版PyTorch，必须先安装与服务器驱动匹配的官方CUDA wheel；主算子工程与`vllm_learning/`使用两个独立虚拟环境。只上传本子目录、没有Git元数据时，`git rev-parse`和`git status`记录为N/A，不应阻断构建。
+
+首次上传完成后可用统一入口重新执行静态检查、环境检查、干净构建、24接口/sm_89检查和GPU测试：
+
+```bash
+bash scripts/15_verify_4090.sh smoke
+bash scripts/15_verify_4090.sh full
+```
+
+`smoke`用于先确认24个接口能够在非默认stream执行；`full`再运行全部pytest。两者都不自动运行Sanitizer、NSYS或NCU，重型实验仍按后续Gate逐项执行。
 
 导出接口检查：
 
@@ -125,6 +138,8 @@ bash scripts/40_sanitize.sh synccheck softmax
 bash scripts/40_sanitize.sh synccheck norm
 bash scripts/40_sanitize.sh synccheck attention
 ```
+
+`40_sanitize.sh`使用`tests/test_sanitizer_smoke.py`中的专用小shape：覆盖24个正式接口以及Norm向量路径和tail fallback，但不重复大型性能shape与数百次稳定性循环。完整shape、数值和性质验证属于Gate 1；Sanitizer在这里专门回答越界、竞态、未初始化读取和同步问题。
 
 验收要求：没有未解释的 invalid access、race hazard、uninitialized read 或 synchronization error。每个 warning 都要记录并判断，不能只看进程退出码。
 
@@ -284,11 +299,25 @@ python scripts/extract_ncu_results.py \
   --strict
 ```
 
-默认读取第6次kernel调用。若采集时修改了warmup次数，使用`--invocation <N>`同步修改；NCU不在默认路径时使用`--ncu-bin /path/to/ncu`或设置`NCU_BIN`。生成结果中的`N/A`表示报告未包含该metric，或该证据只能由NSYS、源码或SASS确认，不能按测量值`0`处理。旧的两个Shell脚本仍保留，用于排查某一份报告的kernel匹配或原始指标。
+NCU入口默认执行5次warmup和1次正式调用，因此提取器默认读取第6次kernel调用。显式设置`ITERS=<N>`只增加正式调用次数，第一个正式调用仍是第6次；只有修改`benchmark/profile_entry.py`中的warmup次数时才需要同步修改`--invocation <N>`。NCU不在默认路径时使用`--ncu-bin /path/to/ncu`或设置`NCU_BIN`。生成结果中的`N/A`表示报告未包含该metric，或该证据只能由NSYS、源码或SASS确认，不能按测量值`0`处理。旧的两个Shell脚本仍保留，用于排查某一份报告的kernel匹配或原始指标。
 
 ## 4. GEMM 实验与指标
 
 GEMM 在本轮作为普通算子验收，不要求重做此前的专项学习报告。
+
+### GEMM版本演进表
+
+下表描述代码结构的演进关系，不代表性能排名。GEMM在`tiled`之后分成padding、register tiling、float4和WMMA等不同优化方向，因此“直接对照”比文件中的排列顺序更重要。
+
+| 顺序/分支 | 当前版本                 | 直接对照          | 相较前驱的核心优化                                                                | 预期收益与新增代价                                                              |
+| --------- | ------------------------ | ----------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| 1 基线    | `gemm_naive`             | —                 | 每个线程计算一个C元素，直接循环读取global A/B。                                   | 结构最直观；同一A/B元素被不同线程重复读取，global流量大。                       |
+| 2 主线    | `gemm_tiled`             | `gemm_naive`      | Block协作把16×16的A/B tile搬入shared memory，再在K维复用。                        | 减少global重复读取；增加shared容量、两次同步和尾部补零。                        |
+| 3A 支线   | `gemm_tiled_padding`     | `gemm_tiled`      | shared数组第二维由16改为17，改变相邻行的bank映射。                                | 用于验证潜在bank conflict；当前访问模式未必受益，必须以冲突指标和Duration确认。 |
+| 3B 主线   | `gemm_regtile2x2`        | `gemm_tiled`      | 每线程从1个输出扩展为相邻2×2输出，用4个累加器复用加载到寄存器的A/B值。            | 提高每次shared读取对应的FMA数量；shared占用和寄存器压力上升。                   |
+| 4 主线    | `gemm_regtile4x4`        | `gemm_regtile2x2` | 每线程进一步计算4×4输出，用16个累加器增加数据复用和指令级并行。                   | 理论复用更高；更容易受Registers/Thread、Occupancy或spill限制。                  |
+| 独立支线  | `gemm_vectorized_float4` | `gemm_naive`      | 每线程计算连续4列，并在满足条件时用float4读取B；不继承register-tile的shared路径。 | 减少load指令并利用连续访问；要求16字节对齐且N为4倍数，否则走标量尾部路径。      |
+| 硬件支线  | `gemm_wmma_fp16`         | `gemm_tiled`      | 用16×16×16 WMMA fragment和Tensor Core执行FP16乘法、FP32累加及输出。               | 获得Tensor pipeline吞吐；引入FP32→FP16转换、低精度误差和非16倍数fallback。      |
 
 ### GEMM：7个版本的八指标横向对比表
 
@@ -476,6 +505,17 @@ GEMM 额外注意：吞吐率上升不代表总工作量减少；同时记录绝
 
 ## 5. Softmax 实验与指标
 
+### Softmax版本演进表
+
+Softmax形成较清晰的线性主线：先把“一线程一行”的串行工作改成Block协作，再减少归约同步，最后改变数值归约算法。表中的“输入遍历次数”按当前源码统计。
+
+| 顺序   | 当前版本               | 直接对照               | 相较前驱的核心优化                                                    | 预期收益与新增代价                                                              |
+| ------ | ---------------------- | ---------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| 1 基线 | `softmax_row`          | —                      | 一个线程串行处理一整行，依次完成max、sum和归一化写回。                | 实现简单且稳定；列数增大时单线程串行，输入共遍历3次。                           |
+| 2      | `softmax_block_reduce` | `softmax_row`          | 一行交给一个Block，线程跨列并行；max和sum使用shared-memory树形归约。  | 长行并行度提高；每级归约都有shared访问和`__syncthreads()`。                     |
+| 3      | `softmax_warp_reduce`  | `softmax_block_reduce` | 先在warp内用shuffle归约，只把各warp结果写入shared，再由首个warp合并。 | 减少shared指令和Block级同步；收益取决于列数、warp利用率和MIO/scoreboard stall。 |
+| 4      | `softmax_online`       | `softmax_warp_reduce`  | 把max与指数和合并为在线状态`(m,l)`，归约时按新max重标定。             | 输入遍历由3次降为2次；增加exp、状态合并和寄存器工作量，不保证一定更快。         |
+
 ### Softmax：4个版本的八指标横向对比表
 
 下面每个正式导出版本占一行，八个固定指标按统一顺序横向排列。执行后将“待在4090填写”替换为“原始数值 + 一句首轮判断”；专项指标只在完成这8项之后补充。
@@ -625,6 +665,17 @@ python scripts/extract_ncu_results.py \
 
 ## 6. LayerNorm 实验与指标
 
+### LayerNorm版本演进表
+
+LayerNorm沿“串行行基线 → Block归约 → warp归约 → float4访存”的顺序演进。向量化版本只改变访存宽度，mean和variance仍然是两轮独立归约。
+
+| 顺序   | 当前版本                 | 直接对照                 | 相较前驱的核心优化                                                         | 预期收益与新增代价                                                                |
+| ------ | ------------------------ | ------------------------ | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| 1 基线 | `layernorm_row`          | —                        | 一个线程串行计算一行的mean、variance和仿射输出。                           | 逻辑清楚；两次统计遍历和一次输出遍历都由单线程完成。                              |
+| 2      | `layernorm_block_reduce` | `layernorm_row`          | 一行交给一个Block，线程并行累加sum/variance，并用shared树形归约。          | 长行并行度提高；两轮归约带来较多shared访问和barrier。                             |
+| 3      | `layernorm_warp_reduce`  | `layernorm_block_reduce` | 用warp shuffle完成warp内求和，仅通过shared合并warp摘要。                   | 减少shared与同步开销；仍需分别完成mean和variance两轮归约。                        |
+| 4      | `layernorm_vectorized`   | `layernorm_warp_reduce`  | 统计和仿射阶段改用float4读取/写回X、gamma、beta和Y，归约继续复用warp方案。 | 减少向量路径的访存指令；要求cols为4倍数且所有指针16字节对齐，否则回退到warp版本。 |
+
 ### LayerNorm：4个版本的八指标横向对比表
 
 下面每个正式导出版本占一行，八个固定指标按统一顺序横向排列。执行后将“待在4090填写”替换为“原始数值 + 一句首轮判断”；专项指标只在完成这8项之后补充。
@@ -773,6 +824,18 @@ python scripts/extract_ncu_results.py \
 
 ## 7. RMSNorm 实验与指标
 
+### RMSNorm版本演进表
+
+前三个版本是归约方式的线性演进；float2和float4是建立在warp归约上的两条向量宽度分支。`rmsnorm_vectorized_float4`不是在同一个kernel里由float2逐步加宽，而是独立kernel和独立fallback判断。
+
+| 顺序/分支   | 当前版本                    | 直接对照               | 相较前驱的核心优化                                       | 预期收益与新增代价                                                                 |
+| ----------- | --------------------------- | ---------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| 1 基线      | `rmsnorm_row`               | —                      | 一个线程串行完成平方和归约及缩放写回，不计算mean和beta。 | 作为RMSNorm基线；长行仍受单线程串行限制。                                          |
+| 2           | `rmsnorm_block_reduce`      | `rmsnorm_row`          | 一行交给一个Block，用shared树形归约并行计算平方和。      | 提高长行并行度；引入shared访问和逐级barrier。                                      |
+| 3           | `rmsnorm_warp_reduce`       | `rmsnorm_block_reduce` | warp内使用shuffle，只在warp间通过shared合并平方和。      | 减少shared指令和同步；仍是标量load/store。                                         |
+| 4A 向量支线 | `rmsnorm_vectorized`        | `rmsnorm_warp_reduce`  | 平方和及写回改用float2，归约结构保持warp方案。           | 减少访存指令；要求8字节对齐且cols为2倍数，否则回退到warp版本。                     |
+| 4B 向量支线 | `rmsnorm_vectorized_float4` | `rmsnorm_vectorized`   | 把独立向量路径从float2加宽到float4，一次处理4个元素。    | 可能进一步减少指令；对16字节对齐和4倍数shape要求更严格，失败时同样回退到warp版本。 |
+
 ### RMSNorm：5个版本的八指标横向对比表
 
 下面每个正式导出版本占一行，八个固定指标按统一顺序横向排列。执行后将“待在4090填写”替换为“原始数值 + 一句首轮判断”；专项指标只在完成这8项之后补充。
@@ -919,6 +982,17 @@ python scripts/extract_ncu_results.py \
 | 产物           | `reports/benchmark/norm.csv`、两份NCU报告及`reports/rmsnorm/RMS-P03-{layernorm-warp,rmsnorm-warp}.md` |
 
 ## 8. Attention 与 KV-cache 实验和指标
+
+### Attention与KV-cache版本演进表
+
+Attention不是四个版本首尾相接的单线优化：`attention_causal_naive`是接口特化，KV-cache是Decode工作负载分支，tiled online-softmax才是当前Prefill计算主线。比较性能时必须先确认两行是否解决相同shape和相同问题。
+
+| 顺序/分支      | 当前版本                         | 直接对照                       | 相较前驱的核心优化                                                                                | 预期收益与新增代价                                                                               |
+| -------------- | -------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| 1 通用基线     | `attention_naive`                | —                              | Host按causal参数分派到编译期`<true>/<false>`kernel；每个输出元素先求max，再重算QK以求sum和加权V。 | 不物化完整score矩阵且便于对拍；QK点积被计算两遍，计算量高。                                      |
+| 2A 特化接口    | `attention_causal_naive`         | `attention_naive(causal=True)` | 直接调用固定`<true>`kernel，去掉Host侧causal分支。                                                | 验证causal专用接口；底层kernel相同，不能预期设备端Duration产生本质变化。                         |
+| 2B Decode支线  | `attention_kv_cache_decode`      | `attention_naive`的prefill形状 | 把Query限制为长度1，只遍历`kv_len`范围内的K/V cache，Grid不再包含Query序列维。                    | 匹配逐token解码并避免计算无关cache位置；通常转为小kernel、launch和cache读取问题。                |
+| 2C Prefill主线 | `attention_tiled_online_softmax` | `attention_naive`              | 按128个key分段遍历，用在线`(m,l,acc)`状态在一次QK遍历中同时合并max、sum和加权V。                  | 消除naive的第二次QK点积；增加在线重标定exp、三组shared状态和寄存器压力，causal判断位于kernel内。 |
 
 ### Attention与KV-cache：4个版本的八指标横向对比表
 
@@ -1295,7 +1369,7 @@ bash scripts/run_debug_experiment.sh help
 | 通过标准       | 能写出“现象 → 错误层 → 证据 → 排除kernel层”的完整判断                             |
 | 产物           | `reports/debug_labs/DBG-E04.log`和人工填写的`DBG-E04.md`                          |
 
-E01失败时停止后续GPU实验，先执行 `bash scripts/clean_build.sh && bash scripts/10_build.sh`，再确认Python实际加载的是当前工程生成的`.so`。不要在未确认加载路径时根据测试现象修改CUDA源码。
+E01失败时停止后续GPU实验，依次执行`bash scripts/clean_build.sh`和`bash scripts/10_build.sh`，再确认Python实际加载的是当前工程生成的`.so`。不要在未确认加载路径时根据测试现象修改CUDA源码。
 
 ### 11.2 Stream、Event与Device真实故障
 

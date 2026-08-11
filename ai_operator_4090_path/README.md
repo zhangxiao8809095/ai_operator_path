@@ -19,10 +19,13 @@ CUDA kernel -> PyTorch Extension -> correctness test -> benchmark -> Nsight prof
 
 ```bash
 bash scripts/00_check_env.sh
-python -m venv .venv
+python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
+bash scripts/00_check_env.sh --strict
 bash scripts/10_build.sh
 ```
+
+上传后可先执行`python scripts/verify_workspace.py`检查文档命令与脚本是否一致；在4090环境中使用`bash scripts/15_verify_4090.sh smoke`完成构建和冒烟验收，准备正式实验前再运行`bash scripts/15_verify_4090.sh full`。
 
 如果修改了 `.cu/.cpp` 文件：
 
@@ -43,6 +46,8 @@ bash scripts/20_test.sh
 tests/test_gemm.py
 tests/test_softmax_norm.py
 tests/test_attention.py
+tests/test_operator_validation.py
+tests/test_sanitizer_smoke.py
 ```
 
 ## 3. Benchmark
@@ -116,17 +121,23 @@ bash scripts/profile_ncu.sh gemm_regtile2x2
 bash scripts/profile_ncu.sh gemm_regtile4x4
 bash scripts/profile_ncu.sh gemm_vectorized_float4
 bash scripts/profile_ncu.sh gemm_wmma_fp16
-bash scripts/profile_ncu.sh softmax
+bash scripts/profile_ncu.sh softmax_row
 bash scripts/profile_ncu.sh softmax_block_reduce
 bash scripts/profile_ncu.sh softmax_warp_reduce
 bash scripts/profile_ncu.sh softmax_online
-bash scripts/profile_ncu.sh layernorm
+bash scripts/profile_ncu.sh layernorm_row
+bash scripts/profile_ncu.sh layernorm_block_reduce
 bash scripts/profile_ncu.sh layernorm_warp_reduce
 bash scripts/profile_ncu.sh layernorm_vectorized
-bash scripts/profile_ncu.sh rmsnorm
+bash scripts/profile_ncu.sh rmsnorm_row
+bash scripts/profile_ncu.sh rmsnorm_block_reduce
 bash scripts/profile_ncu.sh rmsnorm_warp_reduce
 bash scripts/profile_ncu.sh rmsnorm_vectorized
+bash scripts/profile_ncu.sh rmsnorm_vectorized_float4
 bash scripts/profile_ncu.sh attention_naive
+bash scripts/profile_ncu.sh attention_causal_naive
+bash scripts/profile_ncu.sh attention_kv_cache_decode
+bash scripts/profile_ncu.sh attention_tiled_online_softmax
 ```
 
 更完整指标：
@@ -177,17 +188,23 @@ docs/phase_map.md
 文件：`src/aiop4090/csrc/norm.cu`
 
 - `layernorm_row`
+- `layernorm_block_reduce`
 - `layernorm_warp_reduce`
 - `layernorm_vectorized`
 - `rmsnorm_row`
+- `rmsnorm_block_reduce`
 - `rmsnorm_warp_reduce`
 - `rmsnorm_vectorized`
+- `rmsnorm_vectorized_float4`
 
 ### Attention
 
 文件：`src/aiop4090/csrc/attention.cu`
 
 - `attention_naive`
+- `attention_causal_naive`
+- `attention_kv_cache_decode`
+- `attention_tiled_online_softmax`
 
 ## 8. 重要说明
 
