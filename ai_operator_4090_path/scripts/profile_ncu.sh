@@ -11,7 +11,10 @@ fi
 PROFILE_ARGS=("$@")
 ITERS=${ITERS:-1}
 OUT_DIR=${OUT_DIR:-reports/ncu}
-NCU_USE_SUDO=${NCU_USE_SUDO:-0}
+# RTX 4090 rental images commonly restrict GPU performance counters to
+# administrators.  Elevate only the NCU subprocess by default; callers on an
+# unrestricted host can opt out with NCU_USE_SUDO=0.
+NCU_USE_SUDO=${NCU_USE_SUDO:-1}
 
 source scripts/python_env.sh
 

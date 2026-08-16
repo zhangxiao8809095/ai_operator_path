@@ -220,14 +220,14 @@ NSYS 先回答时间属于哪一层：Python/C++ 准备、dtype 转换、临时�
 
 ### Gate 5：NCU
 
-先确认profile进程使用算子工程的CUDA PyTorch环境。若服务器返回`ERR_NVGPUCTRPERM`，说明普通用户被禁止访问GPU Performance Counters；在租用机允许sudo时，只让脚本内部的NCU命令提权，不要执行`sudo bash scripts/profile_ncu.sh ...`：
+先确认profile进程使用算子工程的CUDA PyTorch环境。若服务器返回`ERR_NVGPUCTRPERM`，说明普通用户被禁止访问GPU Performance Counters。当前两个NCU脚本默认设置`NCU_USE_SUDO=1`，只让脚本内部的NCU命令提权；不要执行`sudo bash scripts/profile_ncu.sh ...`：
 
 ```bash
 export PYTHON_BIN=/home/easyai/.venvs/oplab/bin/python
-NCU_USE_SUDO=1 bash scripts/profile_ncu.sh gemm_naive
+bash scripts/profile_ncu.sh gemm_naive
 ```
 
-脚本使用`--section SpeedOfLight`采集轻量报告，并在sudo采集完成后把`.ncu-rep`所有权还给当前用户。若租用环境不提供sudo，需要联系管理员开放performance-counter权限；这属于服务器/驱动权限，不能通过修改kernel绕过。
+脚本使用`--section SpeedOfLight`采集轻量报告，并在sudo采集完成后把`.ncu-rep`所有权还给当前用户。若服务器已经向普通用户开放计数器，可用`NCU_USE_SUDO=0 bash scripts/profile_ncu.sh <算子名>`关闭提权。若租用环境不提供sudo，需要联系管理员开放performance-counter权限；这属于服务器/驱动权限，不能通过修改kernel绕过。
 
 Speed-of-Light 先覆盖目标版本：
 
@@ -437,7 +437,7 @@ python scripts/extract_ncu_results.py \
 
 TFLOP/s按每个profile场景的实际`M/N/K`计算；WMMA fallback会记录实际的`tiled` kernel，不能误填为Tensor Core路径。
 
-下面8项实验均可从项目根目录用统一入口执行：`bash scripts/run_gemm_experiment.sh <实验编号>`。脚本会创建所需的`reports/gemm`、`reports/benchmark`、`reports/ncu`和`reports/nsys`目录；正确性闸门失败时会立即停止，不继续采集性能报告。NCU默认不使用`sudo`，服务器限制性能计数器时显式设置`NCU_USE_SUDO=1`。
+下面8项实验均可从项目根目录用统一入口执行：`bash scripts/run_gemm_experiment.sh <实验编号>`。脚本会创建所需的`reports/gemm`、`reports/benchmark`、`reports/ncu`和`reports/nsys`目录；正确性闸门失败时会立即停止，不继续采集性能报告。NCU默认只对profiler子进程使用`sudo`，不会用root身份运行整个实验脚本；已开放计数器权限的服务器可显式设置`NCU_USE_SUDO=0`。
 
 ### GEMM-C01：验证全部普通FP32版本
 

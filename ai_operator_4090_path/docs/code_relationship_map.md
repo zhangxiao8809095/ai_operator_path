@@ -338,7 +338,7 @@ main()
 `scripts/profile_ncu.sh OP`：
 
 ```text
-ncu --set speed-of-light
+ncu --section SpeedOfLight
   -> python benchmark/profile_entry.py --op OP --iters ITERS
 ```
 
@@ -631,7 +631,7 @@ bash scripts/profile_ncu.sh gemm_tiled
 | `scripts/20_test.sh`                 	| 执行 `pytest -q tests`                                                                        	| correctness 一键测试           	|
 | `scripts/30_bench.sh`                	| 执行 `python benchmark/bench_ops.py --op all`                                                 	| benchmark 一键入口             	|
 | `scripts/clean_build.sh`             	| 删除 build、dist、egg-info、`.so`、`__pycache__`                                               	| 修改 `.cu/.cpp` 后干净重编      	|
-| `scripts/profile_ncu.sh`             	| 用 Nsight Compute `--set speed-of-light` profile `benchmark/profile_entry.py --op OP`         	| 快速看核心性能指标              	|
+| `scripts/profile_ncu.sh`             	| 用 Nsight Compute `--section SpeedOfLight` profile 单个 op；默认只对NCU子进程使用sudo        	| 快速看核心性能指标              	|
 | `scripts/profile_ncu_full.sh`        	| 用 Nsight Compute `--set full` profile 单个 op                                                	| 需要完整指标时用                	|
 | `scripts/profile_nsys.sh`            	| 用 Nsight Systems profile 全量 `bench_ops.py`                                                 	| 看整体时间线和 launch overhead  	|
 

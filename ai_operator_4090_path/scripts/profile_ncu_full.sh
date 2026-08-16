@@ -11,7 +11,9 @@ fi
 PROFILE_ARGS=("$@")
 ITERS=${ITERS:-1}
 OUT_DIR=${OUT_DIR:-reports/ncu}
-NCU_USE_SUDO=${NCU_USE_SUDO:-0}
+# Keep the Python environment in the invoking user account while elevating
+# only Nsight Compute.  Set NCU_USE_SUDO=0 when counters are user-accessible.
+NCU_USE_SUDO=${NCU_USE_SUDO:-1}
 
 source scripts/python_env.sh
 
