@@ -155,7 +155,9 @@ __global__ void layernorm_block_reduce_kernel(const float* __restrict__ X,
                                               const float* __restrict__ beta,
                                               float* __restrict__ Y,
                                               int rows, int cols, float eps) {
-    extern __shared__ WelfordState smem[];
+    // Dynamic shared-memory symbols with different element types must not
+    // reuse the float-reduction symbol name in the same CUDA translation unit.
+    extern __shared__ WelfordState welford_smem[];
     int row = blockIdx.x;
     int tid = threadIdx.x;
 
@@ -164,14 +166,17 @@ __global__ void layernorm_block_reduce_kernel(const float* __restrict__ X,
     for (int col = tid; col < cols; col += blockDim.x) {
         stats = welford_update(stats, X[row * cols + col] - shift);
     }
-    smem[tid] = stats;
+    welford_smem[tid] = stats;
     __syncthreads();
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) smem[tid] = welford_combine(smem[tid], smem[tid + stride]);
+        if (tid < stride) {
+            welford_smem[tid] = welford_combine(
+                welford_smem[tid], welford_smem[tid + stride]);
+        }
         __syncthreads();
     }
-    float mean_delta = smem[0].mean;
-    float variance = __fdiv_rn(smem[0].m2, smem[0].count);
+    float mean_delta = welford_smem[0].mean;
+    float variance = __fdiv_rn(welford_smem[0].m2, welford_smem[0].count);
     float inv_std = rsqrtf(variance + eps);
 
     for (int col = tid; col < cols; col += blockDim.x) {
@@ -212,7 +217,7 @@ __global__ void layernorm_warp_reduce_kernel(const float* __restrict__ X,
                                              const float* __restrict__ beta,
                                              float* __restrict__ Y,
                                              int rows, int cols, float eps) {
-    extern __shared__ WelfordState smem[];
+    extern __shared__ WelfordState welford_smem[];
     int row = blockIdx.x;
     int tid = threadIdx.x;
     if (row >= rows) return;
@@ -222,7 +227,7 @@ __global__ void layernorm_warp_reduce_kernel(const float* __restrict__ X,
     for (int col = tid; col < cols; col += blockDim.x) {
         stats = welford_update(stats, X[row * cols + col] - shift);
     }
-    stats = block_reduce_welford(stats, smem);
+    stats = block_reduce_welford(stats, welford_smem);
     float mean_delta = stats.mean;
     float variance = __fdiv_rn(stats.m2, stats.count);
     float inv_std = rsqrtf(variance + eps);
@@ -260,7 +265,7 @@ __global__ void layernorm_vectorized_kernel(const float* __restrict__ X,
                                             const float* __restrict__ beta,
                                             float* __restrict__ Y,
                                             int rows, int cols, float eps) {
-    extern __shared__ WelfordState smem[];
+    extern __shared__ WelfordState welford_smem[];
     int row = blockIdx.x;
     int tid = threadIdx.x;
     int vec_cols = cols / 4;
@@ -275,7 +280,7 @@ __global__ void layernorm_vectorized_kernel(const float* __restrict__ X,
         stats = welford_update(stats, x.z - shift);
         stats = welford_update(stats, x.w - shift);
     }
-    stats = block_reduce_welford(stats, smem);
+    stats = block_reduce_welford(stats, welford_smem);
     float mean_delta = stats.mean;
     float variance = __fdiv_rn(stats.m2, stats.count);
     float inv_std = rsqrtf(variance + eps);

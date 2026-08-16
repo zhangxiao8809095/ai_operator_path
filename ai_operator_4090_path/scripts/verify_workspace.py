@@ -101,10 +101,36 @@ def check_markdown_tables(text: str) -> list[str]:
     return failures
 
 
+def check_dynamic_shared_symbols(path: Path) -> list[str]:
+    """Reject one CUDA shared-memory symbol declared with multiple types."""
+    declarations: dict[str, tuple[str, int]] = {}
+    failures: list[str] = []
+    pattern = re.compile(
+        r"extern\s+__shared__\s+([A-Za-z_][A-Za-z0-9_:<>]*)\s+"
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\]\s*;"
+    )
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        match = pattern.search(line)
+        if not match:
+            continue
+        element_type, symbol = match.groups()
+        previous = declarations.get(symbol)
+        if previous is not None and previous[0] != element_type:
+            failures.append(
+                f"CUDA dynamic shared symbol {symbol!r} has incompatible types in "
+                f"{relative(path)}:{previous[1]} ({previous[0]}) and "
+                f"{line_number} ({element_type})"
+            )
+        else:
+            declarations[symbol] = (element_type, line_number)
+    return failures
+
+
 def run_checks(*, check_generated: bool = True) -> tuple[dict[str, object], list[str]]:
     failures: list[str] = []
     python_files = source_files(".py")
     shell_files = source_files(".sh")
+    cuda_files = source_files(".cu")
 
     for path in python_files:
         try:
@@ -118,6 +144,8 @@ def run_checks(*, check_generated: bool = True) -> tuple[dict[str, object], list
         )
         if completed.returncode:
             failures.append(f"Shell syntax failed: {relative(path)}: {completed.stderr.strip()}")
+    for path in cuda_files:
+        failures.extend(check_dynamic_shared_symbols(path))
 
     junk = sorted(
         relative(path) for path in ROOT.rglob("*")
@@ -192,6 +220,7 @@ def run_checks(*, check_generated: bool = True) -> tuple[dict[str, object], list
         "root": str(ROOT),
         "python_file_count": len(python_files),
         "shell_file_count": len(shell_files),
+        "cuda_file_count": len(cuda_files),
         "formal_export_count": len(EXPECTED_EXPORTS),
         "documented_command_file_count": len(command_paths),
         "documented_profile_op_count": len(documented_profile_ops),
