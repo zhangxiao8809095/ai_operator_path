@@ -357,7 +357,7 @@ python scripts/extract_ncu_results.py \
   --strict
 ```
 
-NCU入口默认执行5次warmup和1次正式调用，因此提取器默认读取第6次kernel调用。显式设置`ITERS=<N>`只增加正式调用次数，第一个正式调用仍是第6次；只有修改`benchmark/profile_entry.py`中的warmup次数时才需要同步修改`--invocation <N>`。NCU不在默认路径时使用`--ncu-bin /path/to/ncu`或设置`NCU_BIN`。生成结果中的`N/A`表示报告未包含该metric，或该证据只能由NSYS、源码或SASS确认，不能按测量值`0`处理。旧的两个Shell脚本仍保留，用于排查某一份报告的kernel匹配或原始指标。
+NCU入口默认执行5次warmup和1次正式调用，因此提取器优先读取第6次kernel调用；部分NCU版本或采集配置只在报告中保留一次目标调用时，批量工具自动回退到第1次，并在结果的`invocation`列记录实际选择。提取时使用`--kernel-name-base function`，因此Attention的`<true>/<false>`模板参数会被NCU移除，统一按函数基名`attention_naive_kernel`匹配，再由报告文件名区分causal与non-causal场景。显式设置`ITERS=<N>`只增加正式调用次数，第一个正式调用仍是第6次；只有修改`benchmark/profile_entry.py`中的warmup次数时才需要同步修改`--invocation <N>`。NCU不在默认路径时使用`--ncu-bin /path/to/ncu`或设置`NCU_BIN`。生成结果中的`N/A`表示报告未包含该metric，或该证据只能由NSYS、源码或SASS确认，不能按测量值`0`处理。旧的两个Shell脚本仍保留，用于排查某一份报告的kernel匹配或原始指标。
 
 ## 4. GEMM 实验与指标
 

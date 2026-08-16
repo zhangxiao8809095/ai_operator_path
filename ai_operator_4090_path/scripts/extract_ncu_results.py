@@ -80,12 +80,10 @@ def spec(
 
 
 ATTENTION_TRUE_KERNELS = (
-    "attention_naive_kernel<true>",
-    "attention_naive_kernel<(bool)1>",
+    "attention_naive_kernel",
 )
 ATTENTION_FALSE_KERNELS = (
-    "attention_naive_kernel<false>",
-    "attention_naive_kernel<(bool)0>",
+    "attention_naive_kernel",
 )
 
 REGISTRY: dict[str, ProfileSpec] = {
@@ -297,63 +295,69 @@ def run_extractor(script: Path, report: Path, kernel: str, invocation: int, ncu_
 
 def extract_report(report: Path, profile_op: str, profile_spec: ProfileSpec, invocation: int, ncu_bin: str) -> Result:
     failures: list[str] = []
+    invocation_candidates = (invocation,) if invocation == 1 else (invocation, 1)
     for kernel in profile_spec.kernels:
-        status, fixed_stdout, fixed_stderr = run_extractor(
-            FIXED_EXTRACTOR, report, kernel, invocation, ncu_bin
-        )
-        if status != 0:
-            failures.append(f"{kernel}: {fixed_stderr.strip() or 'fixed extractor failed'}")
-            continue
-
-        status, supplemental_stdout, supplemental_stderr = run_extractor(
-            SUPPLEMENTAL_EXTRACTOR, report, kernel, invocation, ncu_bin
-        )
-        if status != 0:
-            failures.append(
-                f"{kernel}: {supplemental_stderr.strip() or 'supplemental extractor failed'}"
+        for selected_invocation in invocation_candidates:
+            status, fixed_stdout, fixed_stderr = run_extractor(
+                FIXED_EXTRACTOR, report, kernel, selected_invocation, ncu_bin
             )
-            continue
+            if status != 0:
+                failures.append(
+                    f"{kernel} invocation={selected_invocation}: "
+                    f"{fixed_stderr.strip() or 'fixed extractor failed'}"
+                )
+                continue
 
-        raw_fixed = parse_markdown_metrics(fixed_stdout)
-        raw_supplemental = parse_markdown_metrics(supplemental_stdout)
-        fixed = {
-            output_name: raw_fixed.get(source_name, "N/A (metric unavailable)")
-            for output_name, source_name in FIXED_SOURCE_NAMES.items()
-        }
-        supplemental = dict(raw_supplemental)
-        supplemental.update(profile_spec.source_metrics)
-        if profile_spec.family == "layernorm":
-            supplemental.setdefault(
-                "Mean/Variance Reduction",
-                "2 reductions (mean + variance) then normalize (source-derived)",
+            status, supplemental_stdout, supplemental_stderr = run_extractor(
+                SUPPLEMENTAL_EXTRACTOR, report, kernel, selected_invocation, ncu_bin
             )
-        if profile_spec.family == "rmsnorm":
-            supplemental.setdefault(
-                "RMS Reduction Work",
-                "1 sum-of-squares reduction then normalize (source-derived)",
+            if status != 0:
+                failures.append(
+                    f"{kernel} invocation={selected_invocation}: "
+                    f"{supplemental_stderr.strip() or 'supplemental extractor failed'}"
+                )
+                continue
+
+            raw_fixed = parse_markdown_metrics(fixed_stdout)
+            raw_supplemental = parse_markdown_metrics(supplemental_stdout)
+            fixed = {
+                output_name: raw_fixed.get(source_name, "N/A (metric unavailable)")
+                for output_name, source_name in FIXED_SOURCE_NAMES.items()
+            }
+            supplemental = dict(raw_supplemental)
+            supplemental.update(profile_spec.source_metrics)
+            if profile_spec.family == "layernorm":
+                supplemental.setdefault(
+                    "Mean/Variance Reduction",
+                    "1 shifted-Welford state reduction then normalize (source-derived)",
+                )
+            if profile_spec.family == "rmsnorm":
+                supplemental.setdefault(
+                    "RMS Reduction Work",
+                    "1 sum-of-squares reduction then normalize (source-derived)",
+                )
+            for name, note in UNAVAILABLE_NOTES.items():
+                supplemental.setdefault(name, note)
+
+            if profile_spec.gemm_shape:
+                seconds = duration_seconds(fixed["Duration"])
+                if seconds and seconds > 0:
+                    m, n, k = profile_spec.gemm_shape
+                    supplemental["Achieved TFLOP/s"] = f"{2.0 * m * n * k / seconds / 1e12:.3f} TFLOP/s"
+                else:
+                    supplemental["Achieved TFLOP/s"] = "N/A (Duration unit could not be parsed)"
+
+            # Duration is also a family-specific series for Attention.
+            supplemental["Duration"] = fixed["Duration"]
+            return Result(
+                report=report,
+                profile_op=profile_op,
+                spec=profile_spec,
+                kernel=kernel,
+                invocation=selected_invocation,
+                fixed=fixed,
+                supplemental=supplemental,
             )
-        for name, note in UNAVAILABLE_NOTES.items():
-            supplemental.setdefault(name, note)
-
-        if profile_spec.gemm_shape:
-            seconds = duration_seconds(fixed["Duration"])
-            if seconds and seconds > 0:
-                m, n, k = profile_spec.gemm_shape
-                supplemental["Achieved TFLOP/s"] = f"{2.0 * m * n * k / seconds / 1e12:.3f} TFLOP/s"
-            else:
-                supplemental["Achieved TFLOP/s"] = "N/A (Duration unit could not be parsed)"
-
-        # Duration is also a family-specific series for Attention.
-        supplemental["Duration"] = fixed["Duration"]
-        return Result(
-            report=report,
-            profile_op=profile_op,
-            spec=profile_spec,
-            kernel=kernel,
-            invocation=invocation,
-            fixed=fixed,
-            supplemental=supplemental,
-        )
 
     details = "\n  ".join(failures)
     raise RuntimeError(f"no kernel candidate matched {report}:\n  {details}")
@@ -550,7 +554,10 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--report-dir", type=Path, help="scan *_full.ncu-rep files in a directory")
     parser.add_argument("--family", choices=("all", *FAMILIES), default="all")
     parser.add_argument("--output-dir", type=Path, default=Path("reports/ncu_summary"))
-    parser.add_argument("--invocation", type=int, default=6, help="kernel invocation after five warmups")
+    parser.add_argument(
+        "--invocation", type=int, default=6,
+        help="preferred kernel invocation after five warmups; batch extraction falls back to 1",
+    )
     parser.add_argument("--ncu-bin", help="path to ncu; otherwise use NCU_BIN/PATH/CUDA defaults")
     parser.add_argument("--strict", action="store_true", help="fail when the directory contains an unknown report name")
     parser.add_argument("--dry-run", action="store_true", help="show report-to-kernel mapping without invoking ncu")
