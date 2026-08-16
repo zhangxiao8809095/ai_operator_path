@@ -379,17 +379,19 @@ GEMM 在本轮作为普通算子验收，不要求重做此前的专项学习报
 
 ### GEMM：7个版本的八指标横向对比表
 
-下面每个正式导出版本占一行，八个固定指标按统一顺序横向排列。执行后将“待在4090填写”替换为“原始数值 + 一句首轮判断”；专项指标只在完成这8项之后补充。
+下面每个正式导出版本占一行，八个固定指标按统一顺序横向排列。本轮原始数据来自`reports/from_4090/gemm_summary.md`，采集shape均为`M=N=K=2048`；float4为aligned路径，WMMA为FP16路径。`Top Stall Reason`在源报告中未提取，因此如实记录为`N/A（报告未提取）`，不能按0解释。
 
-| 算子版本                 | Duration     | Compute (SM) Throughput | Memory Throughput | DRAM Throughput | L2 Cache Throughput | Achieved Occupancy | Registers / Thread | Top Stall Reason |
-| ------------------------ | ------------ | ----------------------- | ----------------- | --------------- | ------------------- | ------------------ | ------------------ | ---------------- |
-| `gemm_naive`             | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `gemm_tiled`             | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `gemm_tiled_padding`     | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `gemm_regtile2x2`        | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `gemm_regtile4x4`        | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `gemm_vectorized_float4` | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `gemm_wmma_fp16`         | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
+| 算子版本                 | Duration  | Compute (SM) Throughput | Memory Throughput | DRAM Throughput | L2 Cache Throughput | Achieved Occupancy | Registers / Thread | Top Stall Reason  |
+| ------------------------ | --------- | ----------------------- | ----------------- | --------------- | ------------------- | ------------------ | ------------------ | ----------------- |
+| `gemm_naive`             | 3.84 ms   | 98.30 %                 | 98.30 %           | 0.97 %          | 37.71 %             | 98.09 %            | 40                 | N/A（报告未提取） |
+| `gemm_tiled`             | 2.93 ms   | 96.27 %                 | 96.27 %           | 1.25 %          | 32.92 %             | 98.17 %            | 38                 | N/A（报告未提取） |
+| `gemm_tiled_padding`     | 4.32 ms   | 97.78 %                 | 97.78 %           | 0.90 %          | 22.37 %             | 98.12 %            | 36                 | N/A（报告未提取） |
+| `gemm_regtile2x2`        | 1.07 ms   | 88.21 %                 | 89.25 %           | 3.32 %          | 44.58 %             | 93.66 %            | 40                 | N/A（报告未提取） |
+| `gemm_regtile4x4`        | 620.86 us | 57.26 %                 | 86.41 %           | 5.46 %          | 39.62 %             | 57.28 %            | 64                 | N/A（报告未提取） |
+| `gemm_vectorized_float4` | 2.30 ms   | 46.40 %                 | 61.88 %           | 1.46 %          | 21.69 %             | 98.29 %            | 25                 | N/A（报告未提取） |
+| `gemm_wmma_fp16`         | 826.50 us | 21.41 %                 | 91.82 %           | 2.02 %          | 91.82 %             | 89.08 %            | 40                 | N/A（报告未提取） |
+
+首轮判断：在该固定shape的kernel级NCU结果中，`gemm_regtile4x4`的Duration最短；`gemm_tiled_padding`反而慢于`tiled`，说明padding不能脱离实际shared访问模式直接判定为优化；WMMA的端到端收益仍需结合NSYS中的转换和分配时间判断。
 
 ### GEMM补充指标说明
 
@@ -408,15 +410,17 @@ GEMM 在本轮作为普通算子验收，不要求重做此前的专项学习报
 
 每个版本占一行。填写“原始数值 + 一句版本差异判断”；确实不适用时填写`N/A + 原因`。
 
-| 算子版本                 | Achieved TFLOP/s | L2 Absolute Traffic | Shared Bank Conflicts | Register Spill | FP32/Tensor Pipeline | MMA Instructions |
-| ------------------------ | ---------------- | ------------------- | --------------------- | -------------- | -------------------- | ---------------- |
-| `gemm_naive`             | 待在4090填写     | 待在4090填写        | 待在4090填写          | 待在4090填写   | 待在4090填写         | 待在4090填写     |
-| `gemm_tiled`             | 待在4090填写     | 待在4090填写        | 待在4090填写          | 待在4090填写   | 待在4090填写         | 待在4090填写     |
-| `gemm_tiled_padding`     | 待在4090填写     | 待在4090填写        | 待在4090填写          | 待在4090填写   | 待在4090填写         | 待在4090填写     |
-| `gemm_regtile2x2`        | 待在4090填写     | 待在4090填写        | 待在4090填写          | 待在4090填写   | 待在4090填写         | 待在4090填写     |
-| `gemm_regtile4x4`        | 待在4090填写     | 待在4090填写        | 待在4090填写          | 待在4090填写   | 待在4090填写         | 待在4090填写     |
-| `gemm_vectorized_float4` | 待在4090填写     | 待在4090填写        | 待在4090填写          | 待在4090填写   | 待在4090填写         | 待在4090填写     |
-| `gemm_wmma_fp16`         | 待在4090填写     | 待在4090填写        | 待在4090填写          | 待在4090填写   | 待在4090填写         | 待在4090填写     |
+| 算子版本                 | Achieved TFLOP/s | L2 Absolute Traffic                                                               | Shared Bank Conflicts                      | Register Spill                                                                     | FP32/Tensor Pipeline                                      | MMA Instructions     |
+| ------------------------ | ---------------- | --------------------------------------------------------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------- | --------------------------------------------------------- | -------------------- |
+| `gemm_naive`             | 4.474 TFLOP/s    | L2 total=4.35 Gbyte; DRAM read=34.36 Mbyte; write=3.29 Mbyte; total=37.65 Mbyte   | load=0 conflict; store=0 conflict          | instructions: load=0 inst; store=0 inst; requests: load=0 request; store=0 request | FMA Pipe Utilization=19.28 %; Tensor Pipe Utilization=0 % | tensor=N/A; HMMA=N/A |
+| `gemm_tiled`             | 5.863 TFLOP/s    | L2 total=4.30 Gbyte; DRAM read=33.67 Mbyte; write=3.30 Mbyte; total=36.97 Mbyte   | load=0 conflict; store=0 conflict          | instructions: load=0 inst; store=0 inst; requests: load=0 request; store=0 request | FMA Pipe Utilization=10.09 %; Tensor Pipe Utilization=0 % | tensor=N/A; HMMA=N/A |
+| `gemm_tiled_padding`     | 3.977 TFLOP/s    | L2 total=4.30 Gbyte; DRAM read=35.49 Mbyte; write=3.54 Mbyte; total=39.03 Mbyte   | load=0 conflict; store=33,554,432 conflict | instructions: load=0 inst; store=0 inst; requests: load=0 request; store=0 request | FMA Pipe Utilization=6.82 %; Tensor Pipe Utilization=0 %  | tensor=N/A; HMMA=N/A |
+| `gemm_regtile2x2`        | 16.056 TFLOP/s   | L2 total=2.14 Gbyte; DRAM read=33.56 Mbyte; write=2.11 Mbyte; total=35.67 Mbyte   | load=0 conflict; store=16,777,216 conflict | instructions: load=0 inst; store=0 inst; requests: load=0 request; store=0 request | FMA Pipe Utilization=23.13 %; Tensor Pipe Utilization=0 % | tensor=N/A; HMMA=N/A |
+| `gemm_regtile4x4`        | 27.671 TFLOP/s   | L2 total=1.10 Gbyte; DRAM read=33.56 Mbyte; write=588.03 Kbyte; total=34.15 Mbyte | load=0 conflict; store=16,777,216 conflict | instructions: load=0 inst; store=0 inst; requests: load=0 request; store=0 request | FMA Pipe Utilization=40.04 %; Tensor Pipe Utilization=0 % | tensor=N/A; HMMA=N/A |
+| `gemm_vectorized_float4` | 7.470 TFLOP/s    | L2 total=2.24 Gbyte; DRAM read=33.56 Mbyte; write=377.86 Kbyte; total=33.94 Mbyte | load=0 conflict; store=0 conflict          | instructions: load=0 inst; store=0 inst; requests: load=0 request; store=0 request | FMA Pipe Utilization=18.03 %; Tensor Pipe Utilization=0 % | tensor=N/A; HMMA=N/A |
+| `gemm_wmma_fp16`         | 20.786 TFLOP/s   | L2 total=1.89 Gbyte; DRAM read=16.78 Mbyte; write=1.02 Kbyte; total=16.78 Mbyte   | load=0 conflict; store=0 conflict          | instructions: load=0 inst; store=0 inst; requests: load=0 request; store=0 request | FMA Pipe Utilization=2.27 %; Tensor Pipe Utilization=0 %  | tensor=N/A; HMMA=N/A |
+
+补充指标首轮判断：`regtile4x4`同时取得最高TFLOP/s和最低L2总流量，支持寄存器分块提高数据复用的解释；padding及register-tiling版本出现大量shared store conflict，需要结合源码访问方式继续定位。WMMA报告未提取到MMA指令且Tensor Pipe为0，现有结果不能单独作为Tensor Core路径证据。
 
 ### GEMM NCU结果自动提取
 
@@ -576,14 +580,16 @@ Softmax形成较清晰的线性主线：先把“一线程一行”的串行工�
 
 ### Softmax：4个版本的八指标横向对比表
 
-下面每个正式导出版本占一行，八个固定指标按统一顺序横向排列。执行后将“待在4090填写”替换为“原始数值 + 一句首轮判断”；专项指标只在完成这8项之后补充。
+下面每个正式导出版本占一行，八个固定指标按统一顺序横向排列。本轮原始数据来自`reports/from_4090/softmax_summary.md`，采集shape均为`rows=8192, cols=4096`。`Top Stall Reason`在源报告中未提取，因此如实记录为`N/A（报告未提取）`。
 
-| 算子版本               | Duration     | Compute (SM) Throughput | Memory Throughput | DRAM Throughput | L2 Cache Throughput | Achieved Occupancy | Registers / Thread | Top Stall Reason |
-| ---------------------- | ------------ | ----------------------- | ----------------- | --------------- | ------------------- | ------------------ | ------------------ | ---------------- |
-| `softmax_row`          | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `softmax_block_reduce` | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `softmax_warp_reduce`  | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `softmax_online`       | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
+| 算子版本               | Duration  | Compute (SM) Throughput | Memory Throughput | DRAM Throughput | L2 Cache Throughput | Achieved Occupancy | Registers / Thread | Top Stall Reason  |
+| ---------------------- | --------- | ----------------------- | ----------------- | --------------- | ------------------- | ------------------ | ------------------ | ----------------- |
+| `softmax_row`          | 2.22 ms   | 1.33 %                  | 51.26 %           | 22.80 %         | 51.26 %             | 16.67 %            | 40                 | N/A（报告未提取） |
+| `softmax_block_reduce` | 256.93 us | 20.98 %                 | 90.25 %           | 90.25 %         | 42.72 %             | 93.24 %            | 16                 | N/A（报告未提取） |
+| `softmax_warp_reduce`  | 255.36 us | 15.20 %                 | 90.80 %           | 90.80 %         | 43.02 %             | 93.24 %            | 16                 | N/A（报告未提取） |
+| `softmax_online`       | 250.30 us | 16.98 %                 | 91.33 %           | 91.33 %         | 34.99 %             | 93.00 %            | 18                 | N/A（报告未提取） |
+
+首轮判断：三个协作归约版本的Duration接近，`softmax_online`在本shape下最短但优势很小；`softmax_row`的低Occupancy和串行行处理对应明显更长的Duration。是否由遍历次数、shared访问或同步造成差异，需要继续结合本章补充指标判断。
 
 ### Softmax补充指标说明
 
@@ -603,12 +609,14 @@ Softmax形成较清晰的线性主线：先把“一线程一行”的串行工�
 
 每个版本占一行。填写“原始数值 + 一句版本差异判断”；确实不适用时填写`N/A + 原因`。
 
-| 算子版本               | Input Passes | Load Bytes   | Exp/Arithmetic Instructions | Shared Access | Barrier Wait | MIO Throttle | Short Scoreboard |
-| ---------------------- | ------------ | ------------ | --------------------------- | ------------- | ------------ | ------------ | ---------------- |
-| `softmax_row`          | 待在4090填写 | 待在4090填写 | 待在4090填写                | 待在4090填写  | 待在4090填写 | 待在4090填写 | 待在4090填写     |
-| `softmax_block_reduce` | 待在4090填写 | 待在4090填写 | 待在4090填写                | 待在4090填写  | 待在4090填写 | 待在4090填写 | 待在4090填写     |
-| `softmax_warp_reduce`  | 待在4090填写 | 待在4090填写 | 待在4090填写                | 待在4090填写  | 待在4090填写 | 待在4090填写 | 待在4090填写     |
-| `softmax_online`       | 待在4090填写 | 待在4090填写 | 待在4090填写                | 待在4090填写  | 待在4090填写 | 待在4090填写 | 待在4090填写     |
+| 算子版本               | Input Passes       | Load Bytes                                                                           | Exp/Arithmetic Instructions                                                          | Shared Access                                                                                                                                   | Barrier Wait                  | MIO Throttle                  | Short Scoreboard              |
+| ---------------------- | ------------------ | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ----------------------------- | ----------------------------- |
+| `softmax_row`          | 3 (source-derived) | L2 total=1.48 Gbyte; DRAM read=402.67 Mbyte; write=105.98 Mbyte; total=508.65 Mbyte  | MUFU / SFU Instructions=N/A; FP Arithmetic Instructions=FADD=N/A; FMUL=N/A; FFMA=N/A | Shared Load Instructions=0 inst; Shared Store Instructions=0 inst; Shared Bank Conflicts=load=0 conflict; store=0 conflict                      | cycles=0 inst; percent=N/A    | cycles=0.00 inst; percent=N/A | cycles=0.09 inst; percent=N/A |
+| `softmax_block_reduce` | 3 (source-derived) | L2 total=491.93 Mbyte; DRAM read=134.22 Mbyte; write=99.27 Mbyte; total=233.49 Mbyte | MUFU / SFU Instructions=N/A; FP Arithmetic Instructions=FADD=N/A; FMUL=N/A; FFMA=N/A | Shared Load Instructions=524,288 inst; Shared Store Instructions=327,680 inst; Shared Bank Conflicts=load=4,201 conflict; store=12,245 conflict | cycles=3.71 inst; percent=N/A | cycles=0.08 inst; percent=N/A | cycles=1.66 inst; percent=N/A |
+| `softmax_warp_reduce`  | 3 (source-derived) | L2 total=492.47 Mbyte; DRAM read=134.23 Mbyte; write=99.24 Mbyte; total=233.47 Mbyte | MUFU / SFU Instructions=N/A; FP Arithmetic Instructions=FADD=N/A; FMUL=N/A; FFMA=N/A | Shared Load Instructions=147,456 inst; Shared Store Instructions=147,456 inst; Shared Bank Conflicts=load=632 conflict; store=1,586 conflict    | cycles=4.77 inst; percent=N/A | cycles=0.02 inst; percent=N/A | cycles=1.29 inst; percent=N/A |
+| `softmax_online`       | 2 (source-derived) | L2 total=392.84 Mbyte; DRAM read=134.24 Mbyte; write=95.97 Mbyte; total=230.21 Mbyte | MUFU / SFU Instructions=N/A; FP Arithmetic Instructions=FADD=N/A; FMUL=N/A; FFMA=N/A | Shared Load Instructions=147,456 inst; Shared Store Instructions=147,456 inst; Shared Bank Conflicts=load=729 conflict; store=1,678 conflict    | cycles=3.29 inst; percent=N/A | cycles=0.07 inst; percent=N/A | cycles=1.10 inst; percent=N/A |
+
+补充指标首轮判断：Online版本把源码遍历次数从3次降为2次，并将L2总流量从block/warp约492 Mbyte降至392.84 Mbyte；warp和online显著减少shared指令与bank conflict。当前报告没有MUFU和FP算术指令值，因此尚不能量化Online状态合并增加的算术代价。
 
 ### Softmax NCU结果自动提取
 
@@ -736,14 +744,16 @@ LayerNorm沿“串行行基线 → Block归约 → warp归约 → float4访存�
 
 ### LayerNorm：4个版本的八指标横向对比表
 
-下面每个正式导出版本占一行，八个固定指标按统一顺序横向排列。执行后将“待在4090填写”替换为“原始数值 + 一句首轮判断”；专项指标只在完成这8项之后补充。
+下面每个正式导出版本占一行，八个固定指标按统一顺序横向排列。本轮原始数据来自`reports/from_4090/layernorm_summary.md`，采集shape均为`rows=8192, cols=4096`，vectorized版本为aligned路径。`Top Stall Reason`在源报告中未提取，因此如实记录为`N/A（报告未提取）`。
 
-| 算子版本                 | Duration     | Compute (SM) Throughput | Memory Throughput | DRAM Throughput | L2 Cache Throughput | Achieved Occupancy | Registers / Thread | Top Stall Reason |
-| ------------------------ | ------------ | ----------------------- | ----------------- | --------------- | ------------------- | ------------------ | ------------------ | ---------------- |
-| `layernorm_row`          | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `layernorm_block_reduce` | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `layernorm_warp_reduce`  | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `layernorm_vectorized`   | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
+| 算子版本                 | Duration  | Compute (SM) Throughput | Memory Throughput | DRAM Throughput | L2 Cache Throughput | Achieved Occupancy | Registers / Thread | Top Stall Reason  |
+| ------------------------ | --------- | ----------------------- | ----------------- | --------------- | ------------------- | ------------------ | ------------------ | ----------------- |
+| `layernorm_row`          | 2.00 ms   | 1.84 %                  | 54.38 %           | 18.77 %         | 54.38 %             | 15.94 %            | 47                 | N/A（报告未提取） |
+| `layernorm_block_reduce` | 258.05 us | 18.50 %                 | 88.95 %           | 88.95 %         | 41.95 %             | 93.45 %            | 26                 | N/A（报告未提取） |
+| `layernorm_warp_reduce`  | 258.72 us | 21.51 %                 | 88.73 %           | 88.73 %         | 41.80 %             | 93.42 %            | 28                 | N/A（报告未提取） |
+| `layernorm_vectorized`   | 247.94 us | 17.11 %                 | 91.80 %           | 91.80 %         | 44.71 %             | 89.81 %            | 30                 | N/A（报告未提取） |
+
+首轮判断：aligned的`layernorm_vectorized`在本shape下Duration最短；block与warp版本几乎持平，不能仅凭warp归约名称认定更快；row版本的低Occupancy与长Duration表明一线程一行仍是主要限制。
 
 ### LayerNorm补充指标说明
 
@@ -762,12 +772,14 @@ LayerNorm沿“串行行基线 → Block归约 → warp归约 → float4访存�
 
 每个版本占一行。填写“原始数值 + 一句版本差异判断”；确实不适用时填写`N/A + 原因`。
 
-| 算子版本                 | Mean/Variance Reductions | Shared Access | Barrier Wait | Absolute Read/Write Bytes | Float4 Load/Store | Requests/Sectors |
-| ------------------------ | ------------------------ | ------------- | ------------ | ------------------------- | ----------------- | ---------------- |
-| `layernorm_row`          | 待在4090填写             | 待在4090填写  | 待在4090填写 | 待在4090填写              | 待在4090填写      | 待在4090填写     |
-| `layernorm_block_reduce` | 待在4090填写             | 待在4090填写  | 待在4090填写 | 待在4090填写              | 待在4090填写      | 待在4090填写     |
-| `layernorm_warp_reduce`  | 待在4090填写             | 待在4090填写  | 待在4090填写 | 待在4090填写              | 待在4090填写      | 待在4090填写     |
-| `layernorm_vectorized`   | 待在4090填写             | 待在4090填写  | 待在4090填写 | 待在4090填写              | 待在4090填写      | 待在4090填写     |
+| 算子版本                 | Mean/Variance Reductions                                          | Shared Access                                                                 | Barrier Wait                  | Absolute Read/Write Bytes                                                            | Float4 Load/Store              | Requests/Sectors                                                                                                                |
+| ------------------------ | ----------------------------------------------------------------- | ----------------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------ | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `layernorm_row`          | 1 shifted-Welford state reduction then normalize (source-derived) | Shared Load Instructions=0 inst; Shared Store Instructions=0 inst             | cycles=0 inst; percent=N/A    | L2 total=1.37 Gbyte; DRAM read=271.44 Mbyte; write=106.00 Mbyte; total=377.44 Mbyte  | scalar row kernel              | Global Requests=load=4,194,560 request; store=1,048,576 request; Global Sectors=load=69,214,208 sector; store=33,554,432 sector |
+| `layernorm_block_reduce` | 1 shifted-Welford state reduction then normalize (source-derived) | Shared Load Instructions=655,360 inst; Shared Store Instructions=491,520 inst | cycles=3.62 inst; percent=N/A | L2 total=483.55 Mbyte; DRAM read=134.29 Mbyte; write=96.85 Mbyte; total=231.14 Mbyte | scalar block kernel            | Global Requests=load=4,259,840 request; store=1,048,576 request; Global Sectors=load=16,842,752 sector; store=4,194,304 sector  |
+| `layernorm_warp_reduce`  | 1 shifted-Welford state reduction then normalize (source-derived) | Shared Load Instructions=90,112 inst; Shared Store Instructions=212,992 inst  | cycles=3.35 inst; percent=N/A | L2 total=484.27 Mbyte; DRAM read=134.26 Mbyte; write=96.91 Mbyte; total=231.17 Mbyte | scalar warp kernel             | Global Requests=load=4,259,840 request; store=1,048,576 request; Global Sectors=load=16,842,752 sector; store=4,194,304 sector  |
+| `layernorm_vectorized`   | 1 shifted-Welford state reduction then normalize (source-derived) | Shared Load Instructions=90,112 inst; Shared Store Instructions=212,992 inst  | cycles=6.50 inst; percent=N/A | L2 total=497.34 Mbyte; DRAM read=134.28 Mbyte; write=94.93 Mbyte; total=229.21 Mbyte | float4 kernel (source-derived) | Global Requests=load=1,114,112 request; store=262,144 request; Global Sectors=load=16,842,752 sector; store=4,194,304 sector    |
+
+补充指标首轮判断：warp归约把block版本的shared load/store指令显著降低；float4路径进一步把global requests降至标量版本约四分之一，但global sectors基本不变，说明主要减少的是指令/请求数量而非必须搬运的数据量。vectorized的Barrier Wait反而更高，需与Duration共同判断。
 
 ### LayerNorm NCU结果自动提取
 
@@ -898,15 +910,17 @@ python scripts/extract_ncu_results.py \
 
 ### RMSNorm：5个版本的八指标横向对比表
 
-下面每个正式导出版本占一行，八个固定指标按统一顺序横向排列。执行后将“待在4090填写”替换为“原始数值 + 一句首轮判断”；专项指标只在完成这8项之后补充。
+下面每个正式导出版本占一行，八个固定指标按统一顺序横向排列。本轮原始数据来自`reports/from_4090/rmsnorm_summary.md`，采集shape均为`rows=8192, cols=4096`，两个vectorized版本均为aligned路径。`Top Stall Reason`在源报告中未提取，因此如实记录为`N/A（报告未提取）`。
 
-| 算子版本                    | Duration     | Compute (SM) Throughput | Memory Throughput | DRAM Throughput | L2 Cache Throughput | Achieved Occupancy | Registers / Thread | Top Stall Reason |
-| --------------------------- | ------------ | ----------------------- | ----------------- | --------------- | ------------------- | ------------------ | ------------------ | ---------------- |
-| `rmsnorm_row`               | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `rmsnorm_block_reduce`      | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `rmsnorm_warp_reduce`       | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `rmsnorm_vectorized`        | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `rmsnorm_vectorized_float4` | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
+| 算子版本                    | Duration  | Compute (SM) Throughput | Memory Throughput | DRAM Throughput | L2 Cache Throughput | Achieved Occupancy | Registers / Thread | Top Stall Reason  |
+| --------------------------- | --------- | ----------------------- | ----------------- | --------------- | ------------------- | ------------------ | ------------------ | ----------------- |
+| `rmsnorm_row`               | 1.72 ms   | 1.70 %                  | 62.50 %           | 21.59 %         | 62.50 %             | 16.67 %            | 40                 | N/A（报告未提取） |
+| `rmsnorm_block_reduce`      | 264.10 us | 15.86 %                 | 90.46 %           | 90.46 %         | 33.86 %             | 88.83 %            | 16                 | N/A（报告未提取） |
+| `rmsnorm_warp_reduce`       | 253.38 us | 13.65 %                 | 89.82 %           | 89.82 %         | 35.32 %             | 92.53 %            | 16                 | N/A（报告未提取） |
+| `rmsnorm_vectorized`        | 248.58 us | 7.94 %                  | 91.00 %           | 91.00 %         | 37.80 %             | 89.56 %            | 20                 | N/A（报告未提取） |
+| `rmsnorm_vectorized_float4` | 244.74 us | 5.17 %                  | 91.79 %           | 91.79 %         | 40.56 %             | 89.81 %            | 22                 | N/A（报告未提取） |
+
+首轮判断：本shape下版本演进对应Duration逐步缩短，float4路径最短，但float2、float4与warp之间差距较小；row版本仍因串行处理和低Occupancy明显落后。向量宽度的因果结论还需结合requests/sectors与绝对bytes。
 
 ### RMSNorm补充指标说明
 
@@ -924,13 +938,15 @@ python scripts/extract_ncu_results.py \
 
 每个版本占一行。填写“原始数值 + 一句版本差异判断”；确实不适用时填写`N/A + 原因`。
 
-| 算子版本                    | RMS Reduction Work | Shared/Barrier | Float2/Float4 Width | Requests/Sectors | Absolute Read/Write Bytes |
-| --------------------------- | ------------------ | -------------- | ------------------- | ---------------- | ------------------------- |
-| `rmsnorm_row`               | 待在4090填写       | 待在4090填写   | 待在4090填写        | 待在4090填写     | 待在4090填写              |
-| `rmsnorm_block_reduce`      | 待在4090填写       | 待在4090填写   | 待在4090填写        | 待在4090填写     | 待在4090填写              |
-| `rmsnorm_warp_reduce`       | 待在4090填写       | 待在4090填写   | 待在4090填写        | 待在4090填写     | 待在4090填写              |
-| `rmsnorm_vectorized`        | 待在4090填写       | 待在4090填写   | 待在4090填写        | 待在4090填写     | 待在4090填写              |
-| `rmsnorm_vectorized_float4` | 待在4090填写       | 待在4090填写   | 待在4090填写        | 待在4090填写     | 待在4090填写              |
+| 算子版本                    | RMS Reduction Work                                         | Shared/Barrier                                                                                                             | Float2/Float4 Width            | Requests/Sectors                                                                                                                | Absolute Read/Write Bytes                                                             |
+| --------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `rmsnorm_row`               | 1 sum-of-squares reduction then normalize (source-derived) | Shared Load Instructions=0 inst; Shared Store Instructions=0 inst; Barrier Stall=cycles=0 inst; percent=N/A                | scalar row kernel              | Global Requests=load=3,145,728 request; store=1,048,576 request; Global Sectors=load=68,157,440 sector; store=33,554,432 sector | L2 total=1.34 Gbyte; DRAM read=268.46 Mbyte; write=105.93 Mbyte; total=374.39 Mbyte   |
+| `rmsnorm_block_reduce`      | 1 sum-of-squares reduction then normalize (source-derived) | Shared Load Instructions=262,144 inst; Shared Store Instructions=163,840 inst; Barrier Stall=cycles=4.20 inst; percent=N/A | scalar block kernel            | Global Requests=load=3,145,728 request; store=1,048,576 request; Global Sectors=load=12,582,912 sector; store=4,194,304 sector  | L2 total=400.78 Mbyte; DRAM read=134.25 Mbyte; write=106.32 Mbyte; total=240.57 Mbyte |
+| `rmsnorm_warp_reduce`       | 1 sum-of-squares reduction then normalize (source-derived) | Shared Load Instructions=73,728 inst; Shared Store Instructions=73,728 inst; Barrier Stall=cycles=4.20 inst; percent=N/A   | scalar warp kernel             | Global Requests=load=3,145,728 request; store=1,048,576 request; Global Sectors=load=12,582,912 sector; store=4,194,304 sector  | L2 total=400.29 Mbyte; DRAM read=134.29 Mbyte; write=94.87 Mbyte; total=229.16 Mbyte  |
+| `rmsnorm_vectorized`        | 1 sum-of-squares reduction then normalize (source-derived) | Shared Load Instructions=73,728 inst; Shared Store Instructions=73,728 inst; Barrier Stall=cycles=14.76 inst; percent=N/A  | float2 kernel (source-derived) | Global Requests=load=1,572,864 request; store=524,288 request; Global Sectors=load=12,582,912 sector; store=4,194,304 sector    | L2 total=401.03 Mbyte; DRAM read=134.27 Mbyte; write=93.51 Mbyte; total=227.78 Mbyte  |
+| `rmsnorm_vectorized_float4` | 1 sum-of-squares reduction then normalize (source-derived) | Shared Load Instructions=73,728 inst; Shared Store Instructions=73,728 inst; Barrier Stall=cycles=16.82 inst; percent=N/A  | float4 kernel (source-derived) | Global Requests=load=786,432 request; store=262,144 request; Global Sectors=load=12,582,912 sector; store=4,194,304 sector      | L2 total=402.60 Mbyte; DRAM read=134.26 Mbyte; write=91.95 Mbyte; total=226.21 Mbyte  |
+
+补充指标首轮判断：warp版本较block版本明显减少shared指令；float2和float4依次把global requests降低至标量warp版本的约二分之一和四分之一，但sectors不变。向量版本Barrier Stall更高，因此其小幅Duration收益应解释为请求数下降与同步代价上升共同作用的结果。
 
 ### RMSNorm NCU结果自动提取
 
@@ -1056,14 +1072,16 @@ Attention不是四个版本首尾相接的单线优化：`attention_causal_naive
 
 ### Attention与KV-cache：4个版本的八指标横向对比表
 
-下面每个正式导出版本占一行，八个固定指标按统一顺序横向排列。执行后将“待在4090填写”替换为“原始数值 + 一句首轮判断”；专项指标只在完成这8项之后补充。
+下面每个正式导出版本占一行，八个固定指标按统一顺序横向排列。本轮原始数据来自`reports/from_4090/attention_summary.md`。`attention_naive`、`attention_causal_naive`和`tiled`均为`B=1,H=8,S=128,D=64`的causal场景；KV-cache版本为`B=1,H=8,Q=1,D=64,kv_len=128`，其Duration不能与Prefill版本直接排名。`Top Stall Reason`在源报告中未提取，因此如实记录为`N/A（报告未提取）`。
 
-| 算子版本                         | Duration     | Compute (SM) Throughput | Memory Throughput | DRAM Throughput | L2 Cache Throughput | Achieved Occupancy | Registers / Thread | Top Stall Reason |
-| -------------------------------- | ------------ | ----------------------- | ----------------- | --------------- | ------------------- | ------------------ | ------------------ | ---------------- |
-| `attention_naive`                | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `attention_causal_naive`         | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `attention_kv_cache_decode`      | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
-| `attention_tiled_online_softmax` | 待在4090填写 | 待在4090填写            | 待在4090填写      | 待在4090填写    | 待在4090填写        | 待在4090填写       | 待在4090填写       | 待在4090填写     |
+| 算子版本                         | Duration | Compute (SM) Throughput | Memory Throughput | DRAM Throughput | L2 Cache Throughput | Achieved Occupancy | Registers / Thread | Top Stall Reason  |
+| -------------------------------- | -------- | ----------------------- | ----------------- | --------------- | ------------------- | ------------------ | ------------------ | ----------------- |
+| `attention_naive`                | 2.33 ms  | 18.08 %                 | 88.31 %           | 0.11 %          | 1.59 %              | 97.97 %            | 40                 | N/A（报告未提取） |
+| `attention_causal_naive`         | 2.33 ms  | 18.09 %                 | 88.39 %           | 0.03 %          | 1.58 %              | 97.96 %            | 40                 | N/A（报告未提取） |
+| `attention_kv_cache_decode`      | 36.90 us | 12.73 %                 | 84.69 %           | 1.44 %          | 21.61 %             | 30.27 %            | 40                 | N/A（报告未提取） |
+| `attention_tiled_online_softmax` | 1.12 ms  | 16.96 %                 | 91.79 %           | 0.08 %          | 4.94 %              | 97.16 %            | 40                 | N/A（报告未提取） |
+
+首轮判断：同一causal Prefill shape下，专用causal接口与通用naive接口的kernel指标基本一致，符合二者落到同一模板kernel的预期；tiled online-softmax把Duration降至1.12 ms。Decode的36.90 us属于不同工作负载，只能用于后续`kv_len`曲线，不能据此宣称其优于Prefill实现。
 
 ### Attention补充指标说明
 
@@ -1083,12 +1101,14 @@ Attention不是四个版本首尾相接的单线优化：`attention_causal_naive
 
 每个版本占一行。填写“原始数值 + 一句版本差异判断”；确实不适用时填写`N/A + 原因`。
 
-| 算子版本                         | Q/K/V and Cache Bytes | L2 Hit Rate/Absolute Traffic | Score Intermediate | Register Spill | Long Scoreboard | Causal Branch Efficiency | Duration vs S/kv_len |
-| -------------------------------- | --------------------- | ---------------------------- | ------------------ | -------------- | --------------- | ------------------------ | -------------------- |
-| `attention_naive`                | 待在4090填写          | 待在4090填写                 | 待在4090填写       | 待在4090填写   | 待在4090填写    | 待在4090填写             | 待在4090填写         |
-| `attention_causal_naive`         | 待在4090填写          | 待在4090填写                 | 待在4090填写       | 待在4090填写   | 待在4090填写    | 待在4090填写             | 待在4090填写         |
-| `attention_kv_cache_decode`      | 待在4090填写          | 待在4090填写                 | 待在4090填写       | 待在4090填写   | 待在4090填写    | 待在4090填写             | 待在4090填写         |
-| `attention_tiled_online_softmax` | 待在4090填写          | 待在4090填写                 | 待在4090填写       | 待在4090填写   | 待在4090填写    | 待在4090填写             | 待在4090填写         |
+| 算子版本                         | Q/K/V and Cache Bytes                                                           | L2 Hit Rate/Absolute Traffic                                                                                         | Score Intermediate                                  | Register Spill                                                                     | Long Scoreboard                | Causal Branch Efficiency                                | Duration vs S/kv_len |
+| -------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------- | ------------------------------ | ------------------------------------------------------- | -------------------- |
+| `attention_naive`                | L2 total=85.17 Mbyte; DRAM read=2.68 Mbyte; write=0 byte; total=2.68 Mbyte      | L2 Hit Rate=96.71 %; L2 / DRAM Bytes=L2 total=85.17 Mbyte; DRAM read=2.68 Mbyte; write=0 byte; total=2.68 Mbyte      | not materialized; score recomputed (source-derived) | instructions: load=0 inst; store=0 inst; requests: load=0 request; store=0 request | cycles=6.05 inst; percent=N/A  | Branch Instructions=N/A; Uniform Branch Targets=98.91 % | 2.33 ms              |
+| `attention_causal_naive`         | L2 total=82.97 Mbyte; DRAM read=796.54 Kbyte; write=0 byte; total=796.54 Kbyte  | L2 Hit Rate=99.25 %; L2 / DRAM Bytes=L2 total=82.97 Mbyte; DRAM read=796.54 Kbyte; write=0 byte; total=796.54 Kbyte  | not materialized; score recomputed (source-derived) | instructions: load=0 inst; store=0 inst; requests: load=0 request; store=0 request | cycles=6.06 inst; percent=N/A  | Branch Instructions=N/A; Uniform Branch Targets=98.91 % | 2.33 ms              |
+| `attention_kv_cache_decode`      | L2 total=17.94 Mbyte; DRAM read=536.19 Kbyte; write=0 byte; total=536.19 Kbyte  | L2 Hit Rate=97.15 %; L2 / DRAM Bytes=L2 total=17.94 Mbyte; DRAM read=536.19 Kbyte; write=0 byte; total=536.19 Kbyte  | not materialized; score recomputed (source-derived) | instructions: load=0 inst; store=0 inst; requests: load=0 request; store=0 request | cycles=37.18 inst; percent=N/A | Branch Instructions=N/A; Uniform Branch Targets=100 %   | 36.90 us             |
+| `attention_tiled_online_softmax` | L2 total=130.42 Mbyte; DRAM read=876.54 Kbyte; write=0 byte; total=876.54 Kbyte | L2 Hit Rate=92.65 %; L2 / DRAM Bytes=L2 total=130.42 Mbyte; DRAM read=876.54 Kbyte; write=0 byte; total=876.54 Kbyte | not materialized; online state (source-derived)     | instructions: load=0 inst; store=0 inst; requests: load=0 request; store=0 request | cycles=8.33 inst; percent=N/A  | Branch Instructions=N/A; Uniform Branch Targets=93.88 % | 1.12 ms              |
+
+补充指标首轮判断：四个实现都没有物化完整score，tiled版本使用online状态并把同shape Prefill Duration降至1.12 ms，但其L2总流量最高且L2命中率更低，说明收益不能解释为简单减少缓存流量。Decode的Long Scoreboard最高，但其shape与Prefill不同，仍需通过多个`kv_len`报告验证趋势。
 
 ### Attention与KV-cache NCU结果自动提取
 
