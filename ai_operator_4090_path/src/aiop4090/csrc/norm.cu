@@ -29,6 +29,77 @@ __forceinline__ __device__ float block_reduce_sum(float val, float* smem) {
     return smem[0];
 }
 
+struct WelfordState {
+    float mean;
+    float m2;
+    float count;
+};
+
+__forceinline__ __device__ WelfordState welford_update(WelfordState state,
+                                                        float value) {
+    float delta = value - state.mean;
+    float new_count = state.count + 1.0f;
+    // setup.py enables --use_fast_math for the teaching kernels.  Force a
+    // round-to-nearest reciprocal here so the statistics do not inherit the
+    // approximate fast division used by ordinary `/` expressions.
+    float reciprocal = __fdiv_rn(1.0f, new_count);
+    float new_mean = state.mean + delta * reciprocal;
+    state.m2 += delta * (value - new_mean);
+    state.mean = new_mean;
+    state.count = new_count;
+    return state;
+}
+
+__forceinline__ __device__ WelfordState welford_combine(WelfordState a,
+                                                         WelfordState b) {
+    float count = a.count + b.count;
+    if (count == 0.0f) return WelfordState{0.0f, 0.0f, 0.0f};
+
+    float reciprocal = __fdiv_rn(1.0f, count);
+    float weight_b = b.count * reciprocal;
+    float delta = b.mean - a.mean;
+    return WelfordState{
+        a.mean + delta * weight_b,
+        a.m2 + b.m2 + delta * delta * a.count * weight_b,
+        count,
+    };
+}
+
+__forceinline__ __device__ WelfordState warp_reduce_welford(WelfordState state) {
+    unsigned int mask = __activemask();
+    int lane = threadIdx.x & (warpSize - 1);
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        WelfordState other{
+            __shfl_down_sync(mask, state.mean, offset),
+            __shfl_down_sync(mask, state.m2, offset),
+            __shfl_down_sync(mask, state.count, offset),
+        };
+        if (lane + offset < warpSize) state = welford_combine(state, other);
+    }
+    return state;
+}
+
+__forceinline__ __device__ WelfordState block_reduce_welford(
+        WelfordState state, WelfordState* smem) {
+    int lane = threadIdx.x & (warpSize - 1);
+    int warp_id = threadIdx.x / warpSize;
+    int warp_count = (blockDim.x + warpSize - 1) / warpSize;
+
+    state = warp_reduce_welford(state);
+    if (lane == 0) smem[warp_id] = state;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        state = lane < warp_count
+            ? smem[lane]
+            : WelfordState{0.0f, 0.0f, 0.0f};
+        state = warp_reduce_welford(state);
+        if (lane == 0) smem[0] = state;
+    }
+    __syncthreads();
+    return smem[0];
+}
+
 bool is_aligned_16(const torch::Tensor& tensor) {
     return (reinterpret_cast<std::uintptr_t>(tensor.data_ptr<float>()) % 16) == 0;
 }
@@ -45,25 +116,19 @@ __global__ void layernorm_row_kernel(const float* __restrict__ X,
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= rows) return;
 
-    // Sum values after shifting by one value from the row.  Directly summing
-    // inputs such as 1000 + O(1e-2) loses the small variation in FP32 before
-    // the variance pass.  mean(x) = shift + mean(x - shift) is mathematically
-    // equivalent and keeps the accumulated values close to zero.
+    // Keep the Welford mean near zero.  Materializing the full mean again
+    // would round a small residual away for inputs such as 1000 + O(1e-2).
     float shift = X[row * cols];
-    float sum = 0.0f;
+    WelfordState stats{0.0f, 0.0f, 0.0f};
     for (int col = 0; col < cols; ++col) {
-        sum += X[row * cols + col] - shift;
+        stats = welford_update(stats, X[row * cols + col] - shift);
     }
-    float mean = shift + sum / cols;
-
-    float var = 0.0f;
+    float mean_delta = stats.mean;
+    float variance = __fdiv_rn(stats.m2, stats.count);
+    float inv_std = rsqrtf(variance + eps);
     for (int col = 0; col < cols; ++col) {
-        float v = X[row * cols + col] - mean;
-        var += v * v;
-    }
-    float inv_std = rsqrtf(var / cols + eps);
-    for (int col = 0; col < cols; ++col) {
-        Y[row * cols + col] = (X[row * cols + col] - mean) * inv_std * gamma[col] + beta[col];
+        float centered = (X[row * cols + col] - shift) - mean_delta;
+        Y[row * cols + col] = centered * inv_std * gamma[col] + beta[col];
     }
 }
 
@@ -90,38 +155,28 @@ __global__ void layernorm_block_reduce_kernel(const float* __restrict__ X,
                                               const float* __restrict__ beta,
                                               float* __restrict__ Y,
                                               int rows, int cols, float eps) {
-    extern __shared__ float smem[];
+    extern __shared__ WelfordState smem[];
     int row = blockIdx.x;
     int tid = threadIdx.x;
 
     float shift = X[row * cols];
-    float local_sum = 0.0f;
+    WelfordState stats{0.0f, 0.0f, 0.0f};
     for (int col = tid; col < cols; col += blockDim.x) {
-        local_sum += X[row * cols + col] - shift;
+        stats = welford_update(stats, X[row * cols + col] - shift);
     }
-    smem[tid] = local_sum;
+    smem[tid] = stats;
     __syncthreads();
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) smem[tid] += smem[tid + stride];
+        if (tid < stride) smem[tid] = welford_combine(smem[tid], smem[tid + stride]);
         __syncthreads();
     }
-    float mean = shift + smem[0] / cols;
-
-    float local_var = 0.0f;
-    for (int col = tid; col < cols; col += blockDim.x) {
-        float v = X[row * cols + col] - mean;
-        local_var += v * v;
-    }
-    smem[tid] = local_var;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) smem[tid] += smem[tid + stride];
-        __syncthreads();
-    }
-    float inv_std = rsqrtf(smem[0] / cols + eps);
+    float mean_delta = smem[0].mean;
+    float variance = __fdiv_rn(smem[0].m2, smem[0].count);
+    float inv_std = rsqrtf(variance + eps);
 
     for (int col = tid; col < cols; col += blockDim.x) {
-        float norm = (X[row * cols + col] - mean) * inv_std;
+        float centered = (X[row * cols + col] - shift) - mean_delta;
+        float norm = centered * inv_std;
         Y[row * cols + col] = norm * gamma[col] + beta[col];
     }
 }
@@ -157,27 +212,24 @@ __global__ void layernorm_warp_reduce_kernel(const float* __restrict__ X,
                                              const float* __restrict__ beta,
                                              float* __restrict__ Y,
                                              int rows, int cols, float eps) {
-    extern __shared__ float smem[];
+    extern __shared__ WelfordState smem[];
     int row = blockIdx.x;
     int tid = threadIdx.x;
     if (row >= rows) return;
 
     float shift = X[row * cols];
-    float local_sum = 0.0f;
+    WelfordState stats{0.0f, 0.0f, 0.0f};
     for (int col = tid; col < cols; col += blockDim.x) {
-        local_sum += X[row * cols + col] - shift;
+        stats = welford_update(stats, X[row * cols + col] - shift);
     }
-    float mean = shift + block_reduce_sum(local_sum, smem) / cols;
-
-    float local_var = 0.0f;
-    for (int col = tid; col < cols; col += blockDim.x) {
-        float v = X[row * cols + col] - mean;
-        local_var += v * v;
-    }
-    float inv_std = rsqrtf(block_reduce_sum(local_var, smem) / cols + eps);
+    stats = block_reduce_welford(stats, smem);
+    float mean_delta = stats.mean;
+    float variance = __fdiv_rn(stats.m2, stats.count);
+    float inv_std = rsqrtf(variance + eps);
 
     for (int col = tid; col < cols; col += blockDim.x) {
-        float norm = (X[row * cols + col] - mean) * inv_std;
+        float centered = (X[row * cols + col] - shift) - mean_delta;
+        float norm = centered * inv_std;
         Y[row * cols + col] = norm * gamma[col] + beta[col];
     }
 }
@@ -208,31 +260,25 @@ __global__ void layernorm_vectorized_kernel(const float* __restrict__ X,
                                             const float* __restrict__ beta,
                                             float* __restrict__ Y,
                                             int rows, int cols, float eps) {
-    extern __shared__ float smem[];
+    extern __shared__ WelfordState smem[];
     int row = blockIdx.x;
     int tid = threadIdx.x;
     int vec_cols = cols / 4;
 
     const float4* X4 = reinterpret_cast<const float4*>(X + row * cols);
     float shift = X[row * cols];
-    float local_sum = 0.0f;
+    WelfordState stats{0.0f, 0.0f, 0.0f};
     for (int vec_col = tid; vec_col < vec_cols; vec_col += blockDim.x) {
         float4 x = X4[vec_col];
-        local_sum += (x.x - shift) + (x.y - shift) +
-                     (x.z - shift) + (x.w - shift);
+        stats = welford_update(stats, x.x - shift);
+        stats = welford_update(stats, x.y - shift);
+        stats = welford_update(stats, x.z - shift);
+        stats = welford_update(stats, x.w - shift);
     }
-    float mean = shift + block_reduce_sum(local_sum, smem) / cols;
-
-    float local_var = 0.0f;
-    for (int vec_col = tid; vec_col < vec_cols; vec_col += blockDim.x) {
-        float4 x = X4[vec_col];
-        float v0 = x.x - mean;
-        float v1 = x.y - mean;
-        float v2 = x.z - mean;
-        float v3 = x.w - mean;
-        local_var += v0 * v0 + v1 * v1 + v2 * v2 + v3 * v3;
-    }
-    float inv_std = rsqrtf(block_reduce_sum(local_var, smem) / cols + eps);
+    stats = block_reduce_welford(stats, smem);
+    float mean_delta = stats.mean;
+    float variance = __fdiv_rn(stats.m2, stats.count);
+    float inv_std = rsqrtf(variance + eps);
 
     float4* Y4 = reinterpret_cast<float4*>(Y + row * cols);
     const float4* G4 = reinterpret_cast<const float4*>(gamma);
@@ -242,10 +288,10 @@ __global__ void layernorm_vectorized_kernel(const float* __restrict__ X,
         float4 g = G4[vec_col];
         float4 b = B4[vec_col];
         float4 y;
-        y.x = (x.x - mean) * inv_std * g.x + b.x;
-        y.y = (x.y - mean) * inv_std * g.y + b.y;
-        y.z = (x.z - mean) * inv_std * g.z + b.z;
-        y.w = (x.w - mean) * inv_std * g.w + b.w;
+        y.x = ((x.x - shift) - mean_delta) * inv_std * g.x + b.x;
+        y.y = ((x.y - shift) - mean_delta) * inv_std * g.y + b.y;
+        y.z = ((x.z - shift) - mean_delta) * inv_std * g.z + b.z;
+        y.w = ((x.w - shift) - mean_delta) * inv_std * g.w + b.w;
         Y4[vec_col] = y;
     }
 }
@@ -383,7 +429,7 @@ torch::Tensor layernorm_warp_reduce(torch::Tensor X, torch::Tensor gamma, torch:
     auto Y = torch::empty_like(X);
     if (rows == 0 || cols == 0) return Y;
     int block = 256;
-    layernorm_warp_reduce_kernel<<<rows, block, block * sizeof(float), at::cuda::getCurrentCUDAStream()>>>(
+    layernorm_warp_reduce_kernel<<<rows, block, block * sizeof(WelfordState), at::cuda::getCurrentCUDAStream()>>>(
         X.data_ptr<float>(), gamma.data_ptr<float>(), beta.data_ptr<float>(),
         Y.data_ptr<float>(), rows, cols, static_cast<float>(eps));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -398,7 +444,7 @@ torch::Tensor layernorm_block_reduce(torch::Tensor X, torch::Tensor gamma, torch
     auto Y = torch::empty_like(X);
     if (rows == 0 || cols == 0) return Y;
     int block = 256;
-    layernorm_block_reduce_kernel<<<rows, block, block * sizeof(float), at::cuda::getCurrentCUDAStream()>>>(
+    layernorm_block_reduce_kernel<<<rows, block, block * sizeof(WelfordState), at::cuda::getCurrentCUDAStream()>>>(
         X.data_ptr<float>(), gamma.data_ptr<float>(), beta.data_ptr<float>(),
         Y.data_ptr<float>(), rows, cols, static_cast<float>(eps));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -416,11 +462,11 @@ torch::Tensor layernorm_vectorized(torch::Tensor X, torch::Tensor gamma, torch::
     bool can_vectorize = (cols % 4 == 0) && is_aligned_16(X) && is_aligned_16(gamma) &&
                           is_aligned_16(beta) && is_aligned_16(Y);
     if (can_vectorize) {
-        layernorm_vectorized_kernel<<<rows, block, block * sizeof(float), at::cuda::getCurrentCUDAStream()>>>(
+        layernorm_vectorized_kernel<<<rows, block, block * sizeof(WelfordState), at::cuda::getCurrentCUDAStream()>>>(
             X.data_ptr<float>(), gamma.data_ptr<float>(), beta.data_ptr<float>(),
             Y.data_ptr<float>(), rows, cols, static_cast<float>(eps));
     } else {
-        layernorm_warp_reduce_kernel<<<rows, block, block * sizeof(float), at::cuda::getCurrentCUDAStream()>>>(
+        layernorm_warp_reduce_kernel<<<rows, block, block * sizeof(WelfordState), at::cuda::getCurrentCUDAStream()>>>(
             X.data_ptr<float>(), gamma.data_ptr<float>(), beta.data_ptr<float>(),
             Y.data_ptr<float>(), rows, cols, static_cast<float>(eps));
     }

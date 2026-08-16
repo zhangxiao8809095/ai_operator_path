@@ -669,13 +669,13 @@ python scripts/extract_ncu_results.py \
 
 ### LayerNorm版本演进表
 
-LayerNorm沿“串行行基线 → Block归约 → warp归约 → float4访存”的顺序演进。向量化版本只改变访存宽度，mean和variance仍然是两轮独立归约。
+LayerNorm沿“串行行基线 → Block归约 → warp归约 → float4访存”的顺序演进。四个版本都用带首元素偏移的Welford状态同时统计mean和variance，避免大偏置小波动输入在FP32中丢失均值残差；版本差异主要在归约层次和访存宽度。
 
 | 顺序   | 当前版本                 | 直接对照                 | 相较前驱的核心优化                                                         | 预期收益与新增代价                                                                |
 | ------ | ------------------------ | ------------------------ | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| 1 基线 | `layernorm_row`          | —                        | 一个线程串行计算一行的mean、variance和仿射输出。                           | 逻辑清楚；两次统计遍历和一次输出遍历都由单线程完成。                              |
-| 2      | `layernorm_block_reduce` | `layernorm_row`          | 一行交给一个Block，线程并行累加sum/variance，并用shared树形归约。          | 长行并行度提高；两轮归约带来较多shared访问和barrier。                             |
-| 3      | `layernorm_warp_reduce`  | `layernorm_block_reduce` | 用warp shuffle完成warp内求和，仅通过shared合并warp摘要。                   | 减少shared与同步开销；仍需分别完成mean和variance两轮归约。                        |
+| 1 基线 | `layernorm_row`          | —                        | 一个线程串行更新一行的Welford状态，再完成仿射输出。                        | 逻辑清楚；一次统计遍历和一次输出遍历都由单线程完成。                              |
+| 2      | `layernorm_block_reduce` | `layernorm_row`          | 一行交给一个Block，各线程生成局部Welford状态，再用shared树形合并。         | 长行并行度提高；Welford状态包含3个float，shared访问和barrier开销增加。            |
+| 3      | `layernorm_warp_reduce`  | `layernorm_block_reduce` | 用warp shuffle合并Welford状态，仅通过shared合并各warp摘要。                | 减少shared与同步开销；每个线程仍需维护mean、M2和count。                           |
 | 4      | `layernorm_vectorized`   | `layernorm_warp_reduce`  | 统计和仿射阶段改用float4读取/写回X、gamma、beta和Y，归约继续复用warp方案。 | 减少向量路径的访存指令；要求cols为4倍数且所有指针16字节对齐，否则回退到warp版本。 |
 
 ### LayerNorm：4个版本的八指标横向对比表
@@ -695,7 +695,7 @@ LayerNorm沿“串行行基线 → Block归约 → warp归约 → float4访存�
 
 | LayerNorm补充指标         | 含义与统一记录方法                                              |
 | ------------------------- | --------------------------------------------------------------- |
-| Mean/Variance Reductions  | 记录均值和方差的Reduction次数、遍历次数及使用的归约层次         |
+| Mean/Variance Reductions  | 记录Welford状态合并次数、统计遍历次数及使用的归约层次           |
 | Shared Access             | 记录shared load/store指令或bytes，比较row、block和warp实现      |
 | Barrier Wait              | 记录barrier数量及等待相关stall，判断block归约的同步代价         |
 | Absolute Read/Write Bytes | 记录输入、输出及中间结果的绝对读写bytes，避免只比较吞吐百分比   |
@@ -722,11 +722,11 @@ python scripts/extract_ncu_results.py \
   --output-dir reports/ncu_summary
 ```
 
-| 自动产物                                         | 用途                                                                                  |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| `reports/ncu_summary/layernorm_fixed8.csv`       | 4个正式版本以及vectorized aligned、misaligned和tail fallback场景的固定八指标          |
-| `reports/ncu_summary/layernorm_supplemental.csv` | 两次归约的源码事实、shared/barrier、绝对流量、requests/sectors和实际向量/fallback路径 |
-| `reports/ncu_summary/layernorm_summary.md`       | 将八指标与LayerNorm专项指标按场景横向对照，直接检查向量化收益是否来自访问合并         |
+| 自动产物                                         | 用途                                                                                         |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| `reports/ncu_summary/layernorm_fixed8.csv`       | 4个正式版本以及vectorized aligned、misaligned和tail fallback场景的固定八指标                 |
+| `reports/ncu_summary/layernorm_supplemental.csv` | Welford统计归约的源码事实、shared/barrier、绝对流量、requests/sectors和实际向量/fallback路径 |
+| `reports/ncu_summary/layernorm_summary.md`       | 将八指标与LayerNorm专项指标按场景横向对照，直接检查向量化收益是否来自访问合并                |
 
 脚本根据报告名记录vectorized实际落到`float4 kernel`还是`warp fallback`；向量指令数量仍需结合NCU Source/SASS页确认，不能只凭profile场景名称推断硬件执行。
 
@@ -758,7 +758,7 @@ python scripts/extract_ncu_results.py \
 | 正确性指标     | 均值相关误差、max abs/rel、NaN/Inf、eps敏感性                          |
 | 性能与因果指标 | N/A                                                                    |
 | 执行命令       | `bash scripts/run_operator_experiment.sh LN-C02`                       |
-| 运行前预测     | 大偏置小波动最容易放大两遍方差公式误差                                 |
+| 运行前预测     | 大偏置小波动会放大FP32均值舍入误差，是验证偏移Welford路径的关键反例    |
 | 通过标准       | 输出有限，误差随eps变化可解释                                          |
 | 产物           | `reports/layernorm/LN-C02.csv`                                         |
 
