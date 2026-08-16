@@ -45,9 +45,16 @@ __global__ void layernorm_row_kernel(const float* __restrict__ X,
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= rows) return;
 
+    // Sum values after shifting by one value from the row.  Directly summing
+    // inputs such as 1000 + O(1e-2) loses the small variation in FP32 before
+    // the variance pass.  mean(x) = shift + mean(x - shift) is mathematically
+    // equivalent and keeps the accumulated values close to zero.
+    float shift = X[row * cols];
     float sum = 0.0f;
-    for (int col = 0; col < cols; ++col) sum += X[row * cols + col];
-    float mean = sum / cols;
+    for (int col = 0; col < cols; ++col) {
+        sum += X[row * cols + col] - shift;
+    }
+    float mean = shift + sum / cols;
 
     float var = 0.0f;
     for (int col = 0; col < cols; ++col) {
@@ -87,9 +94,10 @@ __global__ void layernorm_block_reduce_kernel(const float* __restrict__ X,
     int row = blockIdx.x;
     int tid = threadIdx.x;
 
+    float shift = X[row * cols];
     float local_sum = 0.0f;
     for (int col = tid; col < cols; col += blockDim.x) {
-        local_sum += X[row * cols + col];
+        local_sum += X[row * cols + col] - shift;
     }
     smem[tid] = local_sum;
     __syncthreads();
@@ -97,7 +105,7 @@ __global__ void layernorm_block_reduce_kernel(const float* __restrict__ X,
         if (tid < stride) smem[tid] += smem[tid + stride];
         __syncthreads();
     }
-    float mean = smem[0] / cols;
+    float mean = shift + smem[0] / cols;
 
     float local_var = 0.0f;
     for (int col = tid; col < cols; col += blockDim.x) {
@@ -154,11 +162,12 @@ __global__ void layernorm_warp_reduce_kernel(const float* __restrict__ X,
     int tid = threadIdx.x;
     if (row >= rows) return;
 
+    float shift = X[row * cols];
     float local_sum = 0.0f;
     for (int col = tid; col < cols; col += blockDim.x) {
-        local_sum += X[row * cols + col];
+        local_sum += X[row * cols + col] - shift;
     }
-    float mean = block_reduce_sum(local_sum, smem) / cols;
+    float mean = shift + block_reduce_sum(local_sum, smem) / cols;
 
     float local_var = 0.0f;
     for (int col = tid; col < cols; col += blockDim.x) {
@@ -205,12 +214,14 @@ __global__ void layernorm_vectorized_kernel(const float* __restrict__ X,
     int vec_cols = cols / 4;
 
     const float4* X4 = reinterpret_cast<const float4*>(X + row * cols);
+    float shift = X[row * cols];
     float local_sum = 0.0f;
     for (int vec_col = tid; vec_col < vec_cols; vec_col += blockDim.x) {
         float4 x = X4[vec_col];
-        local_sum += x.x + x.y + x.z + x.w;
+        local_sum += (x.x - shift) + (x.y - shift) +
+                     (x.z - shift) + (x.w - shift);
     }
-    float mean = block_reduce_sum(local_sum, smem) / cols;
+    float mean = shift + block_reduce_sum(local_sum, smem) / cols;
 
     float local_var = 0.0f;
     for (int vec_col = tid; vec_col < vec_cols; vec_col += blockDim.x) {

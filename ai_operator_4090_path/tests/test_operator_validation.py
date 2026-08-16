@@ -308,6 +308,20 @@ def test_layernorm_numerical_inputs(fn, case, eps):
     assert torch.allclose(out, ref, atol=5e-3, rtol=5e-3)
 
 
+def test_layernorm_vectorized_large_offset_fast_path():
+    """Use an aligned row width so this exercises the float4 kernel, not fallback."""
+    torch.manual_seed(113)
+    cols = 260
+    x = torch.randn(3, cols, device="cuda") * 1e-2 + 1e3
+    gamma = torch.linspace(0.5, 1.5, cols, device="cuda")
+    beta = torch.linspace(-0.25, 0.25, cols, device="cuda")
+    out = ops.layernorm_vectorized(x, gamma, beta, 1e-5)
+    ref = torch.nn.functional.layer_norm(x, (cols,), gamma, beta, 1e-5)
+    _print_error("layernorm_vectorized large_offset aligned cols=260", out, ref)
+    assert torch.isfinite(out).all()
+    assert torch.allclose(out, ref, atol=5e-3, rtol=5e-3)
+
+
 @pytest.mark.parametrize("fn", RMSNORM_FNS)
 @pytest.mark.parametrize("cols", [1, 31, 32, 33, 258, 1026])
 def test_rmsnorm_boundary_and_eps(fn, cols):

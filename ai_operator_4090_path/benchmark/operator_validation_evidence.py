@@ -30,22 +30,22 @@ def layernorm_rows():
         "layernorm_vectorized": ops.layernorm_vectorized,
     }
     cases = [
-        ("constant", 1e-3),
-        ("constant", 1e-5),
-        ("small_variance", 1e-5),
-        ("large_offset", 1e-5),
-        ("zero_eps_nonconstant", 0.0),
+        ("constant", 1e-3, 257),
+        ("constant", 1e-5, 257),
+        ("small_variance", 1e-5, 257),
+        ("large_offset", 1e-5, 257),
+        ("large_offset_aligned", 1e-5, 260),
+        ("zero_eps_nonconstant", 0.0, 257),
     ]
     rows = []
-    cols = 257
-    gamma = torch.linspace(0.5, 1.5, cols, device="cuda")
-    beta = torch.linspace(-0.25, 0.25, cols, device="cuda")
-    for case, eps in cases:
+    for case, eps, cols in cases:
+        gamma = torch.linspace(0.5, 1.5, cols, device="cuda")
+        beta = torch.linspace(-0.25, 0.25, cols, device="cuda")
         if case == "constant":
             x = torch.full((3, cols), 7.0, device="cuda")
         elif case == "small_variance":
             x = torch.randn(3, cols, device="cuda") * 1e-5 + 3.0
-        elif case == "large_offset":
+        elif case.startswith("large_offset"):
             x = torch.randn(3, cols, device="cuda") * 1e-2 + 1e3
         else:
             x = torch.randn(3, cols, device="cuda")

@@ -762,6 +762,8 @@ python scripts/extract_ncu_results.py \
 | 通过标准       | 输出有限，误差随eps变化可解释                                          |
 | 产物           | `reports/layernorm/LN-C02.csv`                                         |
 
+其中257列用于覆盖非整齐列数和vectorized fallback；另加260列大偏置小波动输入，确保实际执行float4快路径，而不是把fallback结果误记为vectorized结果。
+
 ### LN-C03：验证边界和fallback
 
 | 字段           | 内容                                             |
