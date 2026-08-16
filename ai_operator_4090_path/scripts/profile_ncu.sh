@@ -13,24 +13,11 @@ ITERS=${ITERS:-1}
 OUT_DIR=${OUT_DIR:-reports/ncu}
 NCU_USE_SUDO=${NCU_USE_SUDO:-0}
 
-find_python_bin() {
-  if [[ -n ${PYTHON_BIN:-} ]]; then
-    printf '%s\n' "$PYTHON_BIN"
-    return
-  fi
-  local name candidate
-  for name in python python3; do
-    candidate=$(command -v "$name" 2>/dev/null || true)
-    if [[ -x "$candidate" ]] && "$candidate" -c 'import sys; raise SystemExit(sys.version_info[0] != 3)' >/dev/null 2>&1; then
-      printf '%s\n' "$candidate"
-      return
-    fi
-  done
-  return 1
-}
+source scripts/python_env.sh
 
-if ! PYTHON_BIN=$(find_python_bin); then
-  echo "error: Python 3 was not found; set PYTHON_BIN explicitly" >&2
+if ! PYTHON_BIN=$(find_python_bin cuda-torch); then
+  echo "error: CUDA-enabled PyTorch was not found; set PYTHON_BIN explicitly" >&2
+  show_python_candidates >&2
   exit 1
 fi
 
@@ -67,6 +54,9 @@ if ! NCU=$(find_ncu); then
 fi
 
 CUDA_ROOT=${CUDA_HOME:-$(cd "$(dirname "$NCU")/.." && pwd)}
+REPORT_BASE="$OUT_DIR/${OP}_sol"
+echo "Using Python: $PYTHON_BIN"
+echo "Using NCU: $NCU"
 NCU_COMMAND=(
   env
   PATH="$CUDA_ROOT/bin:$PATH"
@@ -74,9 +64,9 @@ NCU_COMMAND=(
   TORCH_CUDA_ARCH_LIST="8.9"
   "$NCU"
   --target-processes all
-  --set speed-of-light
+  --section SpeedOfLight
   --force-overwrite
-  -o "$OUT_DIR/${OP}_sol"
+  -o "$REPORT_BASE"
   "$PYTHON_BIN" benchmark/profile_entry.py
   --op "$OP"
   --iters "$ITERS"
@@ -89,6 +79,9 @@ if [[ "$NCU_USE_SUDO" == "1" ]]; then
     exit 1
   }
   sudo "${NCU_COMMAND[@]}"
+  if [[ -e "${REPORT_BASE}.ncu-rep" ]]; then
+    sudo chown "$(id -u):$(id -g)" "${REPORT_BASE}.ncu-rep"
+  fi
 elif [[ "$NCU_USE_SUDO" == "0" ]]; then
   if ! "${NCU_COMMAND[@]}"; then
     echo "hint: if GPU performance counters are restricted, retry with NCU_USE_SUDO=1" >&2
