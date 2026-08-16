@@ -10,14 +10,25 @@ if [[ "$MODE" != "smoke" && "$MODE" != "full" ]]; then
   exit 2
 fi
 
-if [[ -z ${PYTHON_BIN:-} ]]; then
-  PYTHON_BIN=$(command -v python 2>/dev/null || command -v python3 2>/dev/null || true)
-fi
-if [[ -z ${PYTHON_BIN:-} || ! -x "$PYTHON_BIN" ]]; then
-  echo "error: Python 3 was not found; activate the intended environment or set PYTHON_BIN" >&2
+source scripts/python_env.sh
+
+CONFIGURED_PYTHON=${PYTHON_BIN:-}
+if ! PYTHON_BIN=$(find_python_bin cuda-torch); then
+  fallback_python="none"
+  if [[ -n "$CONFIGURED_PYTHON" ]]; then
+    fallback_python=$CONFIGURED_PYTHON
+  else
+    unset PYTHON_BIN
+    fallback_python=$(find_python_bin python3 2>/dev/null || true)
+    [[ -n "$fallback_python" ]] || fallback_python="none"
+  fi
+  show_python_candidates >&2
+  show_cuda_torch_remediation "$fallback_python"
   exit 1
 fi
 export PYTHON_BIN
+
+echo "Using Python: $PYTHON_BIN"
 
 chmod +x scripts/*.sh scripts/*.py debug_labs/*.py \
   vllm_learning/scripts/*.sh vllm_learning/examples/*.py

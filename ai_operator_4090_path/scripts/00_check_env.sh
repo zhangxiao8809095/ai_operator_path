@@ -12,26 +12,7 @@ elif (( $# > 0 )); then
   exit 2
 fi
 
-find_python_bin() {
-  if [[ -n ${PYTHON_BIN:-} ]]; then
-    local configured
-    configured=$(command -v "$PYTHON_BIN" 2>/dev/null || true)
-    if [[ -z "$configured" && -x "$PYTHON_BIN" ]]; then configured=$PYTHON_BIN; fi
-    [[ -n "$configured" ]] || return 1
-    printf '%s\n' "$configured"
-    return
-  fi
-  local name candidate
-  for name in python python3; do
-    candidate=$(command -v "$name" 2>/dev/null || true)
-    if [[ -x "$candidate" ]] && "$candidate" -c \
-      'import sys; raise SystemExit(sys.version_info[0] != 3)' >/dev/null 2>&1; then
-      printf '%s\n' "$candidate"
-      return
-    fi
-  done
-  return 1
-}
+source scripts/python_env.sh
 
 find_cuda_tool() {
   local name=$1
@@ -87,10 +68,22 @@ show_cuda_tool compute-sanitizer "${COMPUTE_SANITIZER_BIN:-}"
 show_cuda_tool cuobjdump "${CUOBJDUMP_BIN:-}"
 
 printf '\n[7/7 Python / PyTorch]\n'
-if ! PYTHON_BIN=$(find_python_bin); then
+CONFIGURED_PYTHON=${PYTHON_BIN:-}
+if ! PYTHON_BIN=$(find_python_bin cuda-torch); then
+  if [[ -n "$CONFIGURED_PYTHON" ]]; then
+    PYTHON_BIN=$CONFIGURED_PYTHON
+  else
+    unset PYTHON_BIN
+    PYTHON_BIN=$(find_python_bin python3 2>/dev/null || true)
+  fi
+fi
+
+if [[ -z ${PYTHON_BIN:-} ]]; then
   echo "Python 3 NOT FOUND"
   FAILURES=$((FAILURES + 1))
-elif ! "$PYTHON_BIN" - <<'PY'
+else
+  PYTHON_STATUS=0
+  "$PYTHON_BIN" - <<'PY' || PYTHON_STATUS=$?
 import sys
 print("python:", sys.executable)
 try:
@@ -108,8 +101,18 @@ print("capability:", torch.cuda.get_device_capability(0))
 if torch.cuda.get_device_capability(0) != (8, 9):
     raise SystemExit(3)
 PY
-then
-  FAILURES=$((FAILURES + 1))
+  if (( PYTHON_STATUS != 0 )); then
+    if (( PYTHON_STATUS == 1 )); then
+      show_python_candidates >&2
+      show_cuda_torch_remediation "$PYTHON_BIN"
+    elif (( PYTHON_STATUS == 2 )); then
+      echo "error: PyTorch has CUDA support, but torch.cuda.is_available() is false." >&2
+      echo "Check nvidia-smi, driver/container GPU access, and CUDA_VISIBLE_DEVICES." >&2
+    elif (( PYTHON_STATUS == 3 )); then
+      echo "error: CUDA is available, but device 0 is not an RTX 4090 (compute capability 8.9)." >&2
+    fi
+    FAILURES=$((FAILURES + 1))
+  fi
 fi
 
 if (( FAILURES > 0 )); then

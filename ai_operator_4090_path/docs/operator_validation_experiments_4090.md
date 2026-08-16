@@ -74,13 +74,15 @@ git rev-parse HEAD
 git status --short
 python scripts/verify_workspace.py
 bash scripts/00_check_env.sh
-python3 -m venv --system-site-packages .venv
+
+# 必须使用能够导入CUDA版PyTorch的基础解释器，不能默认假设/usr/bin/python3已有torch。
+/path/to/python-with-torch -m venv --system-site-packages .venv
 source .venv/bin/activate
 bash scripts/00_check_env.sh --strict
 bash scripts/10_build.sh
 ```
 
-`--system-site-packages`用于复用租赁镜像中已经安装的CUDA版PyTorch。若镜像没有CUDA版PyTorch，必须先安装与服务器驱动匹配的官方CUDA wheel；主算子工程与`vllm_learning/`使用两个独立虚拟环境。只上传本子目录、没有Git元数据时，`git rev-parse`和`git status`记录为N/A，不应阻断构建。
+`--system-site-packages`只能复用“创建该venv的基础解释器”能够看到的包。如果PyTorch位于`/opt/conda/bin/python`，使用`/usr/bin/python3 -m venv --system-site-packages`仍然看不到它。可以先直接执行`PYTHON_BIN=/opt/conda/bin/python bash scripts/15_verify_4090.sh smoke`，或用该解释器创建`.venv`。若镜像没有CUDA版PyTorch，必须先按照PyTorch官方安装选择器安装与服务器相符的CUDA wheel；CUDA 12.6环境可使用`python -m pip install torch --index-url https://download.pytorch.org/whl/cu126`。主算子工程与`vllm_learning/`使用两个独立虚拟环境。只上传本子目录、没有Git元数据时，`git rev-parse`和`git status`记录为N/A，不应阻断构建。
 
 首次上传完成后可用统一入口重新执行静态检查、环境检查、干净构建、24接口/sm_89检查和GPU测试：
 

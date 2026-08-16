@@ -17,13 +17,37 @@ CUDA kernel -> PyTorch Extension -> correctness test -> benchmark -> Nsight prof
 
 ## 1. 初始化
 
+先确认租赁镜像中哪个Python实际包含CUDA版PyTorch。不要默认使用
+`/usr/bin/python3`：很多4090镜像把PyTorch安装在Conda环境中。
+
 ```bash
 bash scripts/00_check_env.sh
-python3 -m venv --system-site-packages .venv
+
+# 如果镜像已有CUDA PyTorch，可直接指定该解释器：
+PYTHON_BIN=/opt/conda/bin/python bash scripts/15_verify_4090.sh smoke
+
+# 也可以用“能够import torch”的解释器创建项目虚拟环境：
+/path/to/python-with-torch -m venv --system-site-packages .venv
 source .venv/bin/activate
 bash scripts/00_check_env.sh --strict
 bash scripts/10_build.sh
 ```
+
+如果镜像完全没有PyTorch，以本项目常用的CUDA 12.6 wheel为例：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install torch --index-url https://download.pytorch.org/whl/cu126
+python -c 'import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())'
+PYTHON_BIN="$(pwd)/.venv/bin/python" bash scripts/15_verify_4090.sh smoke
+```
+
+若服务器不是CUDA 12.6环境，请从PyTorch官方安装选择器获取与服务器相符的
+wheel命令，不要安装CPU-only wheel。`15_verify_4090.sh`现在会优先寻找当前
+虚拟环境、项目`.venv`和Conda中的CUDA版PyTorch；找不到时会列出检查过的
+解释器，不再直接误用缺少PyTorch的`/usr/bin/python3`。
 
 上传后可先执行`python scripts/verify_workspace.py`检查文档命令与脚本是否一致；在4090环境中使用`bash scripts/15_verify_4090.sh smoke`完成构建和冒烟验收，准备正式实验前再运行`bash scripts/15_verify_4090.sh full`。
 

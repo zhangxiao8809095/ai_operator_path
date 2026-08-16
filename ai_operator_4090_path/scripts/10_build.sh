@@ -4,20 +4,12 @@ set -euo pipefail
 PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$PROJECT_DIR"
 
-find_python_bin() {
-  if [[ -n ${PYTHON_BIN:-} ]]; then
-    local configured
-    configured=$(command -v "$PYTHON_BIN" 2>/dev/null || true)
-    if [[ -z "$configured" && -x "$PYTHON_BIN" ]]; then configured=$PYTHON_BIN; fi
-    [[ -n "$configured" ]] || return 1
-    printf '%s\n' "$configured"
-    return
-  fi
-  command -v python 2>/dev/null || command -v python3 2>/dev/null
-}
+source scripts/python_env.sh
 
-if ! PYTHON_BIN=$(find_python_bin); then
-  echo "error: Python 3 was not found; activate the intended environment or set PYTHON_BIN" >&2
+if ! PYTHON_BIN=$(find_python_bin cuda-torch); then
+  fallback_python=$(find_python_bin python3 2>/dev/null || true)
+  show_python_candidates >&2
+  show_cuda_torch_remediation "${fallback_python:-none}"
   exit 1
 fi
 
