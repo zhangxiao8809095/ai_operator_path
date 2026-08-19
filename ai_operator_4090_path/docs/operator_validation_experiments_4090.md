@@ -312,16 +312,16 @@ Duration
 
 八指标是所有版本的第一轮性能体检，不代替正确性，也不直接等于根因。每个版本都必须先填完下面八项，再进入本算子章节的专项指标。`Memory`、`DRAM` 和 `L2 Cache` 除吞吐百分比外，还要结合绝对 bytes、requests 或 sectors 判断；`Top Stall Reason` 不能只写名称。
 
-| 固定八指标              | 每个版本统一填写格式                                                                   |
-| ----------------------- | -------------------------------------------------------------------------------------- |
-| Duration                | Benchmark median/P90/min/max；NCU kernel Duration；单位统一为 us 或 ms                 |
-| Compute (SM) Throughput | 吞吐百分比、主要计算pipeline、是否接近计算侧上限                                       |
-| Memory Throughput       | 吞吐百分比；L1/L2/shared的关键bytes、requests或sectors                                 |
-| DRAM Throughput         | 吞吐百分比、DRAM read/write bytes；低DRAM时不得直接写“非访存瓶颈”                      |
-| L2 Cache Throughput     | 吞吐百分比、L2 read/write bytes或sectors；区分缓存流量和显存流量                       |
-| Achieved Occupancy      | Achieved/Theoretical Occupancy、Blocks/SM及限制资源                                    |
-| Registers / Thread      | 每线程寄存器数、是否限制驻留block/warp、是否出现local load/store或spill                |
-| Top Stall Reason        | Stall名称、cycles、占比及Estimated Speedup；结合Eligible/Issued Warps和Source/SASS定位 |
+| 固定八指标              | 指标定义                                                                                           | 每个版本统一填写格式                                                                         |
+| ----------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Duration                | 完成固定工作量所经历的时间；NCU表示单次kernel设备端执行时间，Benchmark表示选定计时区间的统计结果。 | Benchmark median/P90/min/max；NCU kernel Duration；单位统一为us或ms。                        |
+| Compute (SM) Throughput | kernel执行期间SM计算资源达到其持续峰值的比例，反映计算管线繁忙程度，不等同于实际FLOP/s。           | 记录吞吐百分比、主要计算pipeline及是否接近计算侧上限。                                       |
+| Memory Throughput       | kernel执行期间GPU内存子系统中最繁忙路径相对持续峰值的利用程度，是归一化速率而不是绝对数据量。      | 记录吞吐百分比，并补充L1/L2/shared的关键bytes、requests或sectors。                           |
+| DRAM Throughput         | GPU片外显存接口实际传输速率相对其持续峰值的比例，只反映到达DRAM的流量。                            | 记录吞吐百分比及DRAM read/write bytes；低DRAM时不得直接写“非访存瓶颈”。                      |
+| L2 Cache Throughput     | 数据经过统一L2 cache的传输速率相对其持续峰值的比例，包含命中和未命中相关流量。                     | 记录吞吐百分比及L2 read/write bytes或sectors；区分缓存流量和显存流量。                       |
+| Achieved Occupancy      | 执行期间每个SM平均活跃warp数占硬件最大可驻留warp数的比例。                                         | 记录Achieved/Theoretical Occupancy、Blocks/SM及限制资源。                                    |
+| Registers / Thread      | 编译器为该kernel每个线程静态分配的32位寄存器数量，是驻留资源约束而不是寄存器利用率。               | 记录每线程寄存器数、是否限制驻留block/warp，以及是否出现local load/store或spill。            |
+| Top Stall Reason        | warp scheduler未能发射某warp下一条指令时占比最高的等待原因；它是定位线索，不自动等于根因。         | 记录Stall名称、cycles、占比及Estimated Speedup；结合Eligible/Issued Warps和Source/SASS定位。 |
 
 完成固定八指标后，可按具体问题补查 `Launch Stats`、`Roofline`、绝对流量、指令统计、shared bank conflict或源码/SASS证据。
 
@@ -397,14 +397,14 @@ GEMM 在本轮作为普通算子验收，不要求重做此前的专项学习报
 
 固定八指标完成后，再用下面指标解释GEMM的数据复用、寄存器分块和Tensor Core路径。百分比指标必须和绝对工作量一起判断。
 
-| GEMM补充指标          | 含义与统一记录方法                                                            |
-| --------------------- | ----------------------------------------------------------------------------- |
-| Achieved TFLOP/s      | 按实际执行shape和Duration计算；同时注明FP32、FP16或Tensor Core路径            |
-| L2 Absolute Traffic   | 记录L2 read/write bytes或sectors，用于判断数据复用是否真的减少了缓存流量      |
-| Shared Bank Conflicts | 记录冲突次数或相关比率，并对照padding前后的shared访问方式                     |
-| Register Spill        | 记录local load/store或spill bytes，判断寄存器分块是否把数据溢出到local memory |
-| FP32/Tensor Pipeline  | 记录主要pipeline利用率，区分普通FMA路径和Tensor Core路径                      |
-| MMA Instructions      | 记录MMA指令数量；非WMMA版本填写`0`或`N/A + 原因`                              |
+| GEMM补充指标          | 指标定义                                                                       | 统一记录方法                                                                  |
+| --------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| Achieved TFLOP/s      | 按实际矩阵工作量`2×M×N×K`除以执行时间得到的每秒万亿次浮点运算数。              | 按实际执行shape和Duration计算；同时注明FP32、FP16或Tensor Core路径。          |
+| L2 Absolute Traffic   | 一次kernel执行中经过L2 cache的绝对数据量，而不是相对峰值百分比。               | 记录L2 read/write bytes或sectors，用于判断数据复用是否真的减少缓存流量。      |
+| Shared Bank Conflicts | 同一warp的shared访问命中同一bank不同地址而被拆成多个服务波次所产生的额外冲突。 | 记录冲突次数或相关比率，并对照padding前后的shared访问方式。                   |
+| Register Spill        | 编译器因寄存器分配不足等原因把线程私有值存入local memory并再次加载的行为。     | 记录local load/store指令、requests或spill bytes，判断寄存器分块是否发生溢出。 |
+| FP32/Tensor Pipeline  | SM中普通FP32 FMA管线和Tensor Core矩阵计算管线的实际忙碌或利用程度。            | 记录主要pipeline利用率，区分普通FMA路径和Tensor Core路径。                    |
+| MMA Instructions      | 实际执行的矩阵乘加指令数量，用于证明WMMA/Tensor Core路径确实落到了MMA指令。    | 记录MMA指令数量；非WMMA版本填写`0`或`N/A + 原因`。                            |
 
 ### GEMM补充指标结果表
 
@@ -595,15 +595,15 @@ Softmax形成较清晰的线性主线：先把“一线程一行”的串行工�
 
 固定八指标完成后，再用下面指标解释不同Reduction和Online Softmax实现的实际工作量与同步代价。
 
-| Softmax补充指标             | 含义与统一记录方法                                                       |
-| --------------------------- | ------------------------------------------------------------------------ |
-| Input Passes                | 依据代码和load证据记录输入被完整遍历的次数，区分理论遍历与编译后实际访问 |
-| Load Bytes                  | 记录输入相关绝对load bytes，判断Online版本是否真的减少访存               |
-| Exp/Arithmetic Instructions | 记录exp及主要算术指令量，观察Online状态合并增加的计算工作                |
-| Shared Access               | 记录shared load/store指令或bytes，比较block与warp归约                    |
-| Barrier Wait                | 记录barrier数量及等待相关stall，判断同步是否限制执行                     |
-| MIO Throttle                | 记录对应stall占比或cycles，判断MIO指令队列压力                           |
-| Short Scoreboard            | 记录对应stall占比或cycles，结合shared依赖分析短延迟等待                  |
+| Softmax补充指标             | 指标定义                                                                             | 统一记录方法                                                                 |
+| --------------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| Input Passes                | 算法在逻辑上把一整行输入从头到尾扫描的次数，例如max、sum和归一化可能形成多次遍历。   | 依据代码和load证据记录完整遍历次数，区分源码理论遍历与编译后实际访问。       |
+| Load Bytes                  | kernel为完成Softmax从指定内存层级读取的绝对字节数，必须注明是L2还是DRAM等层级。      | 记录输入相关绝对load bytes，判断Online版本是否真的减少访存。                 |
+| Exp/Arithmetic Instructions | 动态执行的指数函数相关指令及主要浮点加、乘、融合乘加等算术指令数量。                 | 记录exp及主要算术指令量，观察Online状态合并增加的计算工作。                  |
+| Shared Access               | 归约过程中动态执行的shared-memory load/store及其数据量或冲突。                       | 记录shared load/store指令、bytes和必要的bank conflict，比较block与warp归约。 |
+| Barrier Wait                | warp到达CTA同步点后，等待其他warp满足barrier条件而不能继续发射的时间或周期。         | 记录barrier数量及等待相关stall，判断同步是否限制执行。                       |
+| MIO Throttle                | warp因MIO相关指令队列已满而无法发射所产生的stall，常涉及shared、特殊函数等指令通路。 | 记录对应stall占比或cycles，判断MIO指令队列压力。                             |
+| Short Scoreboard            | warp等待短延迟数据依赖完成所产生的stall，常用于定位shared/L1或MIO相关依赖。          | 记录对应stall占比或cycles，并结合产生该依赖的shared或MIO指令分析。           |
 
 ### Softmax补充指标结果表
 
@@ -759,14 +759,14 @@ LayerNorm沿“串行行基线 → Block归约 → warp归约 → float4访存�
 
 固定八指标完成后，再用下面指标解释均值/方差归约、同步和向量化访问的代价。
 
-| LayerNorm补充指标         | 含义与统一记录方法                                              |
-| ------------------------- | --------------------------------------------------------------- |
-| Mean/Variance Reductions  | 记录Welford状态合并次数、统计遍历次数及使用的归约层次           |
-| Shared Access             | 记录shared load/store指令或bytes，比较row、block和warp实现      |
-| Barrier Wait              | 记录barrier数量及等待相关stall，判断block归约的同步代价         |
-| Absolute Read/Write Bytes | 记录输入、输出及中间结果的绝对读写bytes，避免只比较吞吐百分比   |
-| Float4 Load/Store         | 记录向量load/store指令数量，并注明使用快路径还是fallback        |
-| Requests/Sectors          | 记录关键内存层级的requests和sectors，判断向量化是否改善访问合并 |
+| LayerNorm补充指标         | 指标定义                                                                                               | 统一记录方法                                                      |
+| ------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| Mean/Variance Reductions  | 为得到每行均值和方差而进行的统计遍历、线程局部状态生成及跨线程状态合并工作。                           | 记录Welford状态合并次数、统计遍历次数及使用的归约层次。           |
+| Shared Access             | 统计归约和跨warp合并过程中发生的shared-memory load/store访问。                                         | 记录shared load/store指令或bytes，比较row、block和warp实现。      |
+| Barrier Wait              | 线程块内warp因等待归约同步点完成而停顿的时间或周期。                                                   | 记录barrier数量及等待相关stall，判断block归约的同步代价。         |
+| Absolute Read/Write Bytes | kernel从各内存层级读取和写入的绝对数据量，用来描述真实搬运工作量。                                     | 记录输入、gamma、beta、输出及必要中间结果的绝对读写bytes。        |
+| Float4 Load/Store         | 一次用128位向量指令读取或写入4个连续FP32元素的访问路径。                                               | 记录向量load/store指令数量，并注明使用float4快路径还是fallback。  |
+| Requests/Sectors          | memory request是一次合并后的访问请求，sector是缓存实际服务的数据分块；两者关系反映访问合并和传输放大。 | 记录关键内存层级的requests和sectors，判断向量化是否改善访问合并。 |
 
 ### LayerNorm补充指标结果表
 
@@ -926,13 +926,13 @@ python scripts/extract_ncu_results.py \
 
 固定八指标完成后，再用下面指标解释RMS归约层次和float2/float4向量化路径。
 
-| RMSNorm补充指标           | 含义与统一记录方法                                                        |
-| ------------------------- | ------------------------------------------------------------------------- |
-| RMS Reduction Work        | 记录平方和Reduction次数、遍历次数及归约层次                               |
-| Shared/Barrier            | 记录shared访问、barrier数量及等待相关stall，比较block与warp路径           |
-| Float2/Float4 Width       | 记录实际向量指令宽度，并注明float2、float4快路径或fallback                |
-| Requests/Sectors          | 记录关键内存层级的requests和sectors，判断不同向量宽度的访问合并效果       |
-| Absolute Read/Write Bytes | 记录输入、权重和输出的绝对读写bytes，用于比较工作量而不是只比较吞吐百分比 |
+| RMSNorm补充指标           | 指标定义                                                                           | 统一记录方法                                                                |
+| ------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| RMS Reduction Work        | 为得到每行均方值而执行的平方、求和、跨线程归约和最终缩放工作。                     | 记录平方和Reduction次数、输入遍历次数及归约层次。                           |
+| Shared/Barrier            | 平方和归约所需的shared-memory交换，以及保证线程块内数据可见性的barrier同步代价。   | 记录shared访问、barrier数量及等待相关stall，比较block与warp路径。           |
+| Float2/Float4 Width       | 一次向量内存指令分别处理2个或4个连续FP32元素的实际访问宽度。                       | 记录实际向量指令宽度，并注明float2、float4快路径或fallback。                |
+| Requests/Sectors          | memory request数量与缓存实际服务的sector数量，两者共同反映合并访问效率和传输放大。 | 记录关键内存层级的requests和sectors，比较不同向量宽度的访问合并效果。       |
+| Absolute Read/Write Bytes | kernel读取输入和权重、写回输出所产生的绝对数据量。                                 | 记录输入、权重和输出的绝对读写bytes，用于比较工作量而不是只比较吞吐百分比。 |
 
 ### RMSNorm补充指标结果表
 
@@ -1087,15 +1087,15 @@ Attention不是四个版本首尾相接的单线优化：`attention_causal_naive
 
 固定八指标完成后，再用下面指标解释Prefill、Decode、Online Softmax和causal特化的差异。
 
-| Attention补充指标            | 含义与统一记录方法                                                  |
-| ---------------------------- | ------------------------------------------------------------------- |
-| Q/K/V and Cache Bytes        | 记录Q/K/V或KV cache的绝对读取bytes，并注明Prefill或Decode形状       |
-| L2 Hit Rate/Absolute Traffic | 同时记录L2命中率和绝对流量，避免把高命中率直接等同于低访存成本      |
-| Score Intermediate           | 记录是否物化score中间量及其bytes；需要代码和Profiler证据共同确认    |
-| Register Spill               | 记录local load/store或spill bytes，判断Online状态是否造成寄存器压力 |
-| Long Scoreboard              | 记录对应stall的cycles或占比，判断长延迟memory dependency            |
-| Causal Branch Efficiency     | 记录分支指令、有效线程比例或分支效率，解释causal特化收益            |
-| Duration vs S/kv_len         | 固定其他维度，记录Duration随序列长度或`kv_len`变化的曲线和拐点      |
+| Attention补充指标            | 指标定义                                                                                         | 统一记录方法                                                                               |
+| ---------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| Q/K/V and Cache Bytes        | 一次Attention或Decode执行中，为Q、K、V及KV cache服务的绝对数据流量。                             | 记录Q/K/V或KV cache相关bytes并注明Prefill或Decode形状；NCU不能精确拆分时标明kernel总流量。 |
+| L2 Hit Rate/Absolute Traffic | L2命中率表示请求在L2得到满足的比例，绝对流量表示经过L2的数据总量；两者分别描述复用比例和工作量。 | 同时记录L2命中率与绝对bytes/sectors，避免把高命中率直接等同于低访存成本。                  |
+| Score Intermediate           | `QK^T`产生的注意力score是否以完整或分块张量写入内存，以及由此产生的中间数据量。                  | 记录是否物化score及其bytes；结合源码、Profiler和必要的SASS证据确认。                       |
+| Register Spill               | Attention线程状态因寄存器不足等原因被放入local memory并重新加载的行为。                          | 记录local load/store指令、requests或spill bytes，判断Online状态是否造成寄存器溢出。        |
+| Long Scoreboard              | warp等待global/local/texture等长延迟内存数据依赖完成而不能发射的stall。                          | 记录对应stall的cycles或占比，并关联产生等待的具体load。                                    |
+| Causal Branch Efficiency     | 执行causal mask判断时，同一warp线程控制流保持一致及有效执行的程度。                              | 记录分支指令、Uniform Branch Targets、有效线程比例或分支效率，解释causal特化收益。         |
+| Duration vs S/kv_len         | 在其他维度固定时，kernel时间随Prefill序列长度`S`或Decode缓存长度`kv_len`变化的尺度曲线。         | 固定其他维度，记录多个S或`kv_len`的Duration并标出趋势和拐点。                              |
 
 ### Attention补充指标结果表
 
@@ -1340,18 +1340,18 @@ Attention 的 `S×S` 中间矩阵是否真正物化，应以代码和实际内�
 
 故障实验必须在独立临时分支或工程副本中完成。一次只制造一个故障；修复后重新干净构建，并把最小失败输入变成回归测试。不要把错误kernel提交到正式版本。
 
-| 算子族    | 故障                   | 预期工具             | 必须解释的理论          |
-| --------- | ---------------------- | -------------------- | ----------------------- |
-| GEMM      | 删除尾部判断           | memcheck             | thread到地址、异步错误  |
-| GEMM      | 删除一次barrier        | racecheck/synccheck  | shared可见性、CTA同步   |
-| GEMM      | 不写shared尾部identity | initcheck/正确性测试 | tile尾部和零填充        |
-| Softmax   | 去掉减最大值           | 数值对拍             | exp溢出与稳定Softmax    |
-| Softmax   | 删除归约barrier        | racecheck            | Reduction依赖           |
-| Norm      | 强制错位输入走float4   | memcheck             | alignment与安全fallback |
-| Norm      | 改坏方差/RMS公式       | 数值矩阵             | 累加、eps和消减误差     |
-| Attention | 改坏causal条件         | reference对拍        | mask可见范围            |
-| Attention | 改坏Online状态缩放     | 极值/长序列对拍      | Online Softmax合并公式  |
-| Attention | 放宽`kv_len`边界       | memcheck             | KV cache有效范围        |
+| 实验编号/实施说明                                        | 算子族    | 故障                   | 预期工具             | 必须解释的理论          |
+| -------------------------------------------------------- | --------- | ---------------------- | -------------------- | ----------------------- |
+| `FI-GEMM-01`：临时分支手改；`DBG-T01`仅预习OOB机制       | GEMM      | 删除尾部判断           | memcheck             | thread到地址、异步错误  |
+| `FI-GEMM-02`：临时分支手改；`DBG-T02`仅预习竞态机制      | GEMM      | 删除一次barrier        | racecheck/synccheck  | shared可见性、CTA同步   |
+| `FI-GEMM-03`：临时分支手改；`DBG-T03`仅预习未初始化读取  | GEMM      | 不写shared尾部identity | initcheck/正确性测试 | tile尾部和零填充        |
+| `FI-SM-01`：先运行`DBG-U01`，再在临时分支修改CUDA kernel | Softmax   | 去掉减最大值           | 数值对拍             | exp溢出与稳定Softmax    |
+| `FI-SM-02`：临时分支手改；`DBG-T02`仅预习竞态机制        | Softmax   | 删除归约barrier        | racecheck            | Reduction依赖           |
+| `FI-NORM-01`：临时分支手改，当前无一键故障入口           | Norm      | 强制错位输入走float4   | memcheck             | alignment与安全fallback |
+| `FI-NORM-02`：临时分支手改，当前无一键故障入口           | Norm      | 改坏方差/RMS公式       | 数值矩阵             | 累加、eps和消减误差     |
+| `FI-AT-01`：临时分支手改，当前无一键故障入口             | Attention | 改坏causal条件         | reference对拍        | mask可见范围            |
+| `FI-AT-02`：临时分支手改，当前无一键故障入口             | Attention | 改坏Online状态缩放     | 极值/长序列对拍      | Online Softmax合并公式  |
+| `FI-AT-03`：临时分支手改，当前无一键故障入口             | Attention | 放宽`kv_len`边界       | memcheck             | KV cache有效范围        |
 
 统一复盘：
 

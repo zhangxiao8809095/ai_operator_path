@@ -14,7 +14,7 @@ else
 fi
 
 echo "[1/5] Compile Python sources"
-"${python_command}" -m compileall -q src examples tests
+"${python_command}" -m compileall -q src examples experiments tests
 
 echo "[2/5] Import GPU-independent package"
 "${python_command}" -c "from vllm_lab import LabConfig; print(LabConfig.from_env())"
@@ -29,7 +29,7 @@ done
 
 echo "[5/5] Run Ruff when available"
 if "${python_command}" -m ruff --version >/dev/null 2>&1; then
-  "${python_command}" -m ruff check src examples tests
+  "${python_command}" -m ruff check src examples experiments tests
 else
   echo "SKIP: Ruff is not installed in this environment."
 fi

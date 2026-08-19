@@ -11,7 +11,13 @@
 
 第一次接触 vLLM，建议先阅读
 [《vLLM 入门学习指导：从离线推理到 OpenAI 服务》](docs/vllm_beginner_guide.md)，
-再按本文的命令实际运行。
+再按本文的命令实际运行。已经掌握基础调用后，继续阅读
+[《vLLM 技术深潜学习指南：从执行循环到调度、PagedAttention 与性能工程》](docs/vllm_technical_deep_dive.md)，
+学习调度预算、KV block 地址映射、容量推导、指标诊断和性能实验。
+准备把概念转化为可复现实证时，按
+[《vLLM 掌握路径：RTX 4090 调试实验手册》](docs/vllm_debugging_experiments.md)
+逐项执行；实际结果单独写入
+[《vLLM 调试实验结果记录》](docs/vllm_experiment_results.md)，避免把实验设计和实测数据混在一起。
 
 > vLLM/PyTorch 的预编译 wheel 会携带它自己的 CUDA 运行时；本工程为了严格匹配
 > CUDA 12.6，默认固定到官方仍提供 cu126 wheel 的
@@ -24,12 +30,16 @@
 vllm_learning/
 ├── data/prompts.jsonl              # 离线批量输入样例
 ├── docs/vllm_beginner_guide.md     # 配合代码阅读的入门指导
+├── docs/vllm_technical_deep_dive.md # 调度、KV与性能工程进阶指导
+├── docs/vllm_debugging_experiments.md # 10个可重复调试实验
+├── docs/vllm_experiment_results.md # 由JSON生成的独立结果表
 ├── examples/
 │   ├── 01_basic_inference.py       # 基础推理
 │   ├── 02_offline_batch.py         # JSONL 离线批量推理
 │   ├── 03_sampling_params.py       # greedy / balanced / creative
 │   ├── 04_kv_cache_observe.py      # 模型加载及长短请求显存快照
 │   └── 05_openai_client.py         # OpenAI Python 客户端请求
+├── experiments/                    # 实验代码和结果文档渲染器
 ├── requirements/                   # GPU、客户端、开发依赖分组
 ├── scripts/                        # 环境检查、安装、运行、服务、验证
 ├── src/vllm_lab/                   # 无 GPU 也可导入和测试的公共代码
@@ -78,15 +88,17 @@ set +a
 
 常用变量：
 
-| 变量 | 默认值 | 含义 |
-| --- | --- | --- |
-| `VLLM_MODEL` | `Qwen/Qwen2.5-1.5B-Instruct` | 模型 ID 或本地路径 |
-| `VLLM_DTYPE` | `auto` | 权重/计算数据类型 |
-| `VLLM_TENSOR_PARALLEL_SIZE` | `1` | 张量并行 GPU 数 |
-| `VLLM_GPU_MEMORY_UTILIZATION` | `0.85` | 当前 vLLM 实例可使用的 GPU 显存比例 |
-| `VLLM_MAX_MODEL_LEN` | `4096` | 最大上下文长度 |
-| `VLLM_TRUST_REMOTE_CODE` | `false` | 是否允许模型仓库自定义代码 |
-| `VLLM_SEED` | `42` | 随机种子 |
+| 变量                          | 默认值                       | 含义                                            |
+| ----------------------------- | ---------------------------- | ----------------------------------------------- |
+| `VLLM_MODEL`                  | `Qwen/Qwen2.5-1.5B-Instruct` | 模型 ID 或本地路径                              |
+| `VLLM_DTYPE`                  | `auto`                       | 权重/计算数据类型                               |
+| `VLLM_TENSOR_PARALLEL_SIZE`   | `1`                          | 张量并行 GPU 数                                 |
+| `VLLM_GPU_MEMORY_UTILIZATION` | `0.85`                       | 当前 vLLM 实例可使用的 GPU 显存比例             |
+| `VLLM_MAX_MODEL_LEN`          | `4096`                       | 最大上下文长度                                  |
+| `VLLM_TRUST_REMOTE_CODE`      | `false`                      | 是否允许模型仓库自定义代码                      |
+| `VLLM_SEED`                   | `42`                         | 随机种子                                        |
+| `VLLM_ENABLE_CHUNKED_PREFILL` | 空                           | 服务端是否显式开启/关闭 Chunked Prefill         |
+| `VLLM_MAX_NUM_BATCHED_TOKENS` | 空                           | 服务端每轮调度的 token 预算；空值沿用 vLLM 默认 |
 
 4090 单卡应保持 `VLLM_TENSOR_PARALLEL_SIZE=1`。`tensor_parallel_size=1` 就是非分布式兼容路径；张量并行的意义是将模型切到多张 GPU 上，不能让单张 4090 模拟 `2` 路并行。只有服务器确实有 N 张可见 GPU，且模型层/注意力头支持 N 路切分时，才设置为 N。
 
@@ -247,3 +259,30 @@ curl -s http://127.0.0.1:8000/metrics \
 ```
 
 若显存中已有其他进程，先用 `nvidia-smi` 确认剩余空间；不要直接把 `VLLM_GPU_MEMORY_UTILIZATION` 调到 `1.0`。
+
+## 7. 调试实验
+
+实验代码不会自动连续执行全部 GPU 负载。先通过前置检查，再按实验手册逐级运行：
+
+```bash
+bash scripts/run_experiment.sh preflight
+bash scripts/run_experiment.sh engine-lifecycle
+bash scripts/run_experiment.sh prefill-decode
+bash scripts/run_experiment.sh offline-batching
+bash scripts/run_experiment.sh sampling
+bash scripts/run_experiment.sh kv-pressure
+bash scripts/run_experiment.sh prefix-caching
+```
+
+启动 OpenAI 兼容服务后，在另一个终端运行在线实验：
+
+```bash
+bash scripts/run_experiment.sh service-smoke
+bash scripts/run_experiment.sh continuous-batching
+# Chunked Prefill 需要按实验手册重启两种服务配置后分别运行
+bash scripts/run_experiment.sh render-results
+```
+
+每个实验把原始数据写到 `reports/experiments/*.json`；该目录默认忽略，不会把某台服务器的
+偶然结果混入工程。`render-results` 读取已有 JSON，更新独立结果文档；没有报告的实验会明确
+显示“未运行”，不会生成伪造数值。
